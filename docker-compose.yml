@@ -1,0 +1,24 @@
+# ─── docker-compose.yml for News Agent Pipeline ───
+# Start:        docker compose up -d
+# Logs:         docker compose logs -f news-agent
+# Stop:         docker compose down
+# Rebuild:      docker compose up -d --build
+# One-off run:  docker compose run --rm news-agent python main.py --trigger manual
+# Index only:   docker compose run --rm news-agent python main.py --index --sitemap-url https://example.com/sitemap.xml
+
+services:
+  news-agent:
+    build: .
+    container_name: news-agent
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      # Persist storage (blogs, cache, vector-store, etc.) across restarts
+      - ./storage:/app/storage
+      # Persist SQLite scheduler DB
+      - ./app/scheduler.db:/app/app/scheduler.db
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
