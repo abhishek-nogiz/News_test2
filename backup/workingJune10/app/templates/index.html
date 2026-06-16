@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trend Agent Scheduler</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --card: #1a1d27;
+            --card-border: #2a2d3a;
+            --text: #e4e4e7;
+            --text-muted: #9ca3af;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --input-bg: #12131a;
+            --input-border: #2a2d3a;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container { max-width: 920px; margin: 0 auto; }
+
+        /* ── Header ── */
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 1.75rem;
+        }
+        h2 { font-size: 1.75rem; font-weight: 700; color: #fff; }
+        .header-badge {
+            font-size: 0.7rem; padding: 0.25rem 0.6rem; border-radius: 20px;
+            background: rgba(99,102,241,0.15); color: var(--accent);
+            font-weight: 600; letter-spacing: 0.5px;
+        }
+
+        h3 {
+            font-size: 1.05rem; font-weight: 600; margin-bottom: 0.75rem; color: #fff;
+        }
+
+        /* ── Create button ── */
+        .btn-create {
+            display: flex; align-items: center; gap: 0.4rem;
+            background: var(--accent); color: #fff; border: none; border-radius: 8px;
+            padding: 0.55rem 1.2rem; font-size: 0.88rem; font-weight: 600;
+            cursor: pointer; transition: background 0.2s;
+        }
+        .btn-create:hover { background: var(--accent-hover); }
+        .btn-create svg { width: 16px; height: 16px; }
+
+        /* ── Card ── */
+        .card {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: 12px; padding: 1.5rem; margin-bottom: 1.25rem;
+        }
+
+        /* ── Job card ── */
+        .job-card {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: 12px; padding: 1.25rem 1.5rem; margin-bottom: 0.85rem;
+        }
+        .job-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 0.6rem;
+        }
+        .job-name { font-size: 1rem; font-weight: 600; color: #fff; }
+        .job-meta {
+            display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem;
+        }
+        .meta-tag {
+            font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 6px;
+            background: rgba(255,255,255,0.06); color: var(--text-muted);
+        }
+        .meta-tag.type-alarm { background: rgba(99,102,241,0.12); color: var(--accent-hover); }
+        .meta-tag.type-interval { background: rgba(34,197,94,0.12); color: var(--success); }
+
+        .schedule-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0.45rem 0; border-top: 1px solid var(--card-border);
+            margin-top: 0.25rem;
+        }
+        .schedule-info {
+            font-size: 0.82rem; color: var(--text-muted);
+        }
+        .countdown {
+            font-size: 0.82rem; font-weight: 600; color: var(--warning);
+        }
+        .countdown.overdue { color: var(--danger); }
+
+        .job-actions {
+            display: flex; gap: 0.5rem; margin-top: 0.75rem;
+        }
+        .btn-sm {
+            font-size: 0.78rem; padding: 0.35rem 0.75rem; border-radius: 6px;
+            cursor: pointer; font-weight: 500; transition: all 0.15s; border: 1px solid transparent;
+        }
+        .btn-run-sm {
+            background: transparent; color: var(--success); border-color: var(--success);
+        }
+        .btn-run-sm:hover { background: var(--success); color: #fff; }
+        .btn-pause-sm {
+            background: transparent; color: var(--warning); border-color: var(--warning);
+        }
+        .btn-pause-sm:hover { background: var(--warning); color: #000; }
+        .btn-resume-sm {
+            background: transparent; color: var(--info); border-color: var(--info);
+        }
+        .btn-resume-sm:hover { background: var(--info); color: #fff; }
+        .btn-edit-sm {
+            background: transparent; color: var(--accent-hover); border-color: var(--accent);
+        }
+        .btn-edit-sm:hover { background: var(--accent); color: #fff; }
+        .btn-delete-sm {
+            background: transparent; color: var(--danger); border-color: var(--danger);
+        }
+        .btn-delete-sm:hover { background: var(--danger); color: #fff; }
+
+        /* ── Badges ── */
+        .badge {
+            display: inline-block; padding: 0.12rem 0.5rem; border-radius: 20px;
+            font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+        }
+        .badge-pending   { background: rgba(99,102,241,0.15); color: var(--accent-hover); }
+        .badge-running   { background: rgba(59,130,246,0.15); color: var(--info); }
+        .badge-paused    { background: rgba(245,158,11,0.15); color: var(--warning); }
+        .badge-completed { background: rgba(34,197,94,0.15); color: var(--success); }
+        .badge-failed    { background: rgba(239,68,68,0.15); color: var(--danger); }
+        .badge-cancelled { background: rgba(156,163,175,0.15); color: var(--text-muted); }
+        .badge-success   { background: rgba(34,197,94,0.15); color: var(--success); }
+        .badge-skipped   { background: rgba(245,158,11,0.15); color: var(--warning); }
+        .badge-never     { background: rgba(156,163,175,0.15); color: var(--text-muted); }
+
+        /* ── Pulse for running ── */
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        .badge-running { animation: pulse 1.5s ease-in-out infinite; }
+
+        /* ── Empty state ── */
+        .empty {
+            text-align: center; padding: 2rem 0; color: var(--text-muted); font-size: 0.9rem;
+        }
+
+        /* ── Section divider ── */
+        .section-head {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 0.75rem;
+        }
+
+        /* ── History table ── */
+        .history-table { width: 100%; border-collapse: collapse; }
+        .history-table th {
+            text-align: left; font-size: 0.75rem; text-transform: uppercase;
+            letter-spacing: 0.5px; color: var(--text-muted); padding: 0.5rem 0.5rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+        .history-table td {
+            padding: 0.5rem 0.5rem; font-size: 0.82rem; border-bottom: 1px solid var(--card-border);
+        }
+        .history-table tr:last-child td { border-bottom: none; }
+
+        /* ── Modal ── */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; z-index: 100;
+            background: rgba(0,0,0,0.65); justify-content: center; align-items: center;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: 14px; padding: 1.75rem; width: 480px; max-width: 95vw;
+            max-height: 90vh; overflow-y: auto;
+        }
+        .modal h3 { margin-bottom: 1rem; }
+
+        label {
+            display: block; font-size: 0.78rem; font-weight: 500;
+            color: var(--text-muted); margin-bottom: 0.3rem;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .form-group { margin-bottom: 1rem; }
+
+        select, input[type="number"], input[type="text"], input[type="datetime-local"] {
+            width: 100%; padding: 0.55rem 0.75rem; background: var(--input-bg);
+            border: 1px solid var(--input-border); border-radius: 8px;
+            color: var(--text); font-size: 0.88rem; outline: none;
+            transition: border-color 0.2s;
+        }
+        select:focus, input:focus { border-color: var(--accent); }
+
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+        .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
+
+        /* Toggle button group */
+        .toggle-group {
+            display: flex; border-radius: 8px; overflow: hidden;
+            border: 1px solid var(--input-border);
+        }
+        .toggle-group input[type="radio"] { display: none; }
+        .toggle-group label {
+            flex: 1; text-align: center; padding: 0.55rem 0.75rem; cursor: pointer;
+            font-size: 0.82rem; font-weight: 500; text-transform: none; letter-spacing: 0;
+            color: var(--text-muted); background: var(--input-bg); transition: all 0.2s;
+            margin-bottom: 0;
+        }
+        .toggle-group input[type="radio"]:checked + label {
+            background: var(--accent); color: #fff;
+        }
+        .toggle-group label:hover { color: var(--text); }
+
+        .modal-actions {
+            display: flex; gap: 0.65rem; margin-top: 1.25rem; justify-content: flex-end;
+        }
+        .btn-cancel {
+            background: transparent; color: var(--text-muted); border: 1px solid var(--card-border);
+            border-radius: 8px; padding: 0.55rem 1.2rem; font-size: 0.88rem;
+            cursor: pointer; font-weight: 500;
+        }
+        .btn-cancel:hover { border-color: var(--text-muted); color: var(--text); }
+        .btn-save {
+            background: var(--accent); color: #fff; border: none; border-radius: 8px;
+            padding: 0.55rem 1.2rem; font-size: 0.88rem; cursor: pointer; font-weight: 600;
+        }
+        .btn-save:hover { background: var(--accent-hover); }
+
+        .description {
+            color: var(--text-muted); font-size: 0.78rem; margin-top: 0.3rem; line-height: 1.45;
+        }
+
+        /* ── Error banner ── */
+        .error-banner {
+            background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.25);
+            border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;
+            font-size: 0.82rem; color: var(--danger); display: none;
+        }
+
+        /* ── Responsive ── */
+        @media (max-width: 600px) {
+            .form-row, .form-row-3 { grid-template-columns: 1fr; }
+            body { padding: 1rem; }
+            .job-actions { flex-wrap: wrap; }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <!-- ── Header ── -->
+    <div class="header">
+        <h2>Trend Agent Scheduler</h2>
+        <div style="display:flex;align-items:center;gap:0.75rem">
+            <span class="header-badge">STANDALONE</span>
+            <button class="btn-create" onclick="openCreateModal()">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v10M3 8h10"/></svg>
+                Create Job
+            </button>
+        </div>
+    </div>
+
+    <!-- ── Active Jobs ── -->
+    <div class="section-head">
+        <h3 style="margin:0">Active Jobs</h3>
+    </div>
+    <div id="active-jobs">
+        <div class="empty">No active jobs — click <strong>Create Job</strong> to get started.</div>
+    </div>
+
+    <!-- ── Past Jobs ── -->
+    <div class="section-head" id="past-section" style="display:none;margin-top:1.25rem">
+        <h3 style="margin:0">Past Jobs</h3>
+    </div>
+    <div id="past-jobs"></div>
+
+    <!-- ── Execution History ── -->
+    <div class="section-head" style="margin-top:1.75rem">
+        <h3 style="margin:0">Execution History</h3>
+    </div>
+    <div class="card" style="padding:0; overflow-x:auto">
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Job</th>
+                    <th>Trigger</th>
+                    <th>Pipeline</th>
+                    <th>Publish</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody id="history-body">
+                <tr><td colspan="6" class="empty">No executions yet.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ── Create / Edit Modal ── -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModalOutside(event)">
+    <div class="modal">
+        <h3 id="modal-title">Create New Job</h3>
+        <div class="error-banner" id="modal-error"></div>
+        <input type="hidden" id="edit-job-id" value="">
+
+        <div class="form-group">
+            <label>Job Name</label>
+            <input type="text" id="f-name" placeholder="e.g. US Politics Daily">
+        </div>
+
+        <div class="form-group">
+            <label>Job Type</label>
+            <div class="toggle-group">
+                <input type="radio" id="f-type-alarm" name="f-type" value="alarm">
+                <label for="f-type-alarm">One Time</label>
+                <input type="radio" id="f-type-interval" name="f-type" value="interval" checked>
+                <label for="f-type-interval">Recurring</label>
+            </div>
+        </div>
+
+        <!-- Alarm fields -->
+        <div class="form-group" id="f-alarm-group" style="display:none">
+            <label>Date &amp; Time</label>
+            <input type="datetime-local" id="f-run-at">
+            <p class="description">Runs the pipeline once at the specified time. Must be in the future.</p>
+        </div>
+
+        <!-- Interval fields -->
+        <div class="form-group" id="f-interval-group">
+            <label>Run Every N Hours</label>
+            <input type="number" id="f-interval" min="1" max="168" value="4">
+            <p class="description">Runs the pipeline on a recurring schedule. First run starts after the first interval elapses.</p>
+        </div>
+
+        <div class="form-row-3">
+            <div class="form-group">
+                <label>Country</label>
+                <select id="f-country">
+                    {% for c in countries %}
+                    <option value="{{ c }}">{{ c }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Category</label>
+                <select id="f-category">
+                    {% for name, details in categories.items() %}
+                    <option value="{{ name }}">{{ name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>WP Status</label>
+                <select id="f-wp-status">
+                    {% for s in wordpress_statuses %}
+                    <option value="{{ s }}">{{ s | capitalize }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+            <button class="btn-save" onclick="saveJob()">Save</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ── Category map from server ──
+const CATEGORY_MAP = {{ categories | tojson }};
+
+// ── State ──
+let allJobs = [];
+let allHistory = [];
+
+// ── API helpers ──
+async function api(method, path, body) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    return r.json();
+}
+
+// ── Load data ──
+async function loadJobs() {
+    try {
+        allJobs = await api('GET', '/api/jobs');
+    } catch { allJobs = []; }
+    renderJobs();
+}
+
+async function loadHistory() {
+    try {
+        allHistory = await api('GET', '/api/history?limit=30');
+    } catch { allHistory = []; }
+    renderHistory();
+}
+
+// ── Render jobs ──
+function renderJobs() {
+    const active = allJobs.filter(j => ['pending','running','paused'].includes(j.status));
+    const past   = allJobs.filter(j => ['completed','failed','cancelled'].includes(j.status));
+
+    const activeEl = document.getElementById('active-jobs');
+    const pastEl   = document.getElementById('past-jobs');
+    const pastSec  = document.getElementById('past-section');
+
+    // Active
+    if (active.length === 0) {
+        activeEl.innerHTML = '<div class="empty">No active jobs — click <strong>Create Job</strong> to get started.</div>';
+    } else {
+        activeEl.innerHTML = active.map(j => jobCardHTML(j)).join('');
+    }
+
+    // Past
+    if (past.length === 0) {
+        pastEl.innerHTML = '';
+        pastSec.style.display = 'none';
+    } else {
+        pastSec.style.display = '';
+        pastEl.innerHTML = past.map(j => jobCardHTML(j)).join('');
+    }
+}
+
+function jobCardHTML(j) {
+    const isAlarm = j.job_type === 'alarm';
+    const typeLabel = isAlarm ? 'One Time' : 'Recurring';
+    const typeCls   = isAlarm ? 'type-alarm' : 'type-interval';
+
+    // Schedule text
+    let schedText = '';
+    if (j.status === 'running') schedText = 'Running now…';
+    else if (j.status === 'paused') schedText = 'Paused';
+    else if (isAlarm) schedText = j.run_at ? fmtDT(j.run_at) : 'Not set';
+    else schedText = `Every ${j.interval_hours || 4}h`;
+
+    // Countdown (only for pending jobs with next_run_at)
+    let cdHTML = '';
+    if (j.status === 'pending' && j.next_run_at) {
+        cdHTML = `<span class="countdown" data-target="${j.next_run_at}"></span>`;
+    }
+
+    // Error
+    let errHTML = '';
+    if (j.error_message) {
+        errHTML = `<div style="font-size:0.78rem;color:var(--danger);margin-top:0.35rem">${esc(j.error_message)}</div>`;
+    }
+
+    // Actions
+    let actions = '';
+    if (j.status === 'pending' || j.status === 'paused') {
+        actions += `<button class="btn-sm btn-run-sm" onclick="runNow(${j.id})">Run Now</button>`;
+    }
+    if (j.status === 'pending' || j.status === 'failed') {
+        actions += `<button class="btn-sm btn-pause-sm" onclick="pauseJob(${j.id})">Pause</button>`;
+    }
+    if (j.status === 'paused') {
+        actions += `<button class="btn-sm btn-resume-sm" onclick="resumeJob(${j.id})">Resume</button>`;
+    }
+    if (['pending','paused','failed'].includes(j.status)) {
+        actions += `<button class="btn-sm btn-edit-sm" onclick="editJob(${j.id})">Edit</button>`;
+    }
+    if (j.status !== 'running') {
+        const delLabel = j.status === 'cancelled' ? 'Delete' : 'Cancel';
+        actions += `<button class="btn-sm btn-delete-sm" onclick="deleteJob(${j.id},'${j.status}')">${delLabel}</button>`;
+    }
+
+    return `
+    <div class="job-card" data-job-id="${j.id}">
+        <div class="job-header">
+            <span class="job-name">${esc(j.name)}</span>
+            <span class="badge badge-${j.status}">${j.status}</span>
+        </div>
+        <div class="job-meta">
+            <span class="meta-tag ${typeCls}">${typeLabel}</span>
+            <span class="meta-tag">${esc(j.country)}</span>
+            <span class="meta-tag">${esc(j.category_name)}</span>
+            <span class="meta-tag">WP: ${esc((j.wordpress_status||'draft').charAt(0).toUpperCase() + (j.wordpress_status||'draft').slice(1))}</span>
+        </div>
+        <div class="schedule-row">
+            <span class="schedule-info">${schedText}</span>
+            ${cdHTML}
+        </div>
+        ${errHTML}
+        <div class="job-actions">${actions}</div>
+    </div>`;
+}
+
+// ── Render history ──
+function renderHistory() {
+    const tbody = document.getElementById('history-body');
+    if (allHistory.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No executions yet.</td></tr>';
+        return;
+    }
+
+    // Enrich with job names
+    const jobMap = {};
+    allJobs.forEach(j => jobMap[j.id] = j.name);
+
+    tbody.innerHTML = allHistory.map(h => {
+        const jName = jobMap[h.job_id] || `#${h.job_id}`;
+        const trig = h.trigger_type === 'manual' ? 'Manual' : 'Scheduler';
+        const pubSt = h.publish_status || 'pending';
+        return `<tr>
+            <td>${fmtDT(h.started_at)}</td>
+            <td>${esc(jName)}</td>
+            <td>${trig}</td>
+            <td><span class="badge badge-${h.status}">${h.status}</span></td>
+            <td><span class="badge badge-${pubSt}">${pubSt}</span></td>
+            <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${h.error_message?'var(--danger)':'var(--text-muted)'}">${esc(h.error_message||'—')}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ── Countdown tickers ──
+function tickCountdowns() {
+    document.querySelectorAll('.countdown[data-target]').forEach(el => {
+        const target = new Date(el.dataset.target);
+        const diff = target - new Date();
+        if (diff <= 0) {
+            el.textContent = 'Due now';
+            el.classList.add('overdue');
+        } else {
+            el.textContent = fmtCountdown(diff);
+            el.classList.remove('overdue');
+        }
+    });
+}
+
+// ── Actions ──
+async function runNow(id) {
+    if (!confirm('Run this job now? It will not affect the scheduled next run.')) return;
+    await api('POST', `/api/jobs/${id}/run`);
+    await loadJobs();
+    await loadHistory();
+    startFastPoll();
+}
+
+async function pauseJob(id) {
+    if (!confirm('Pause this job?')) return;
+    await api('POST', `/api/jobs/${id}/pause`);
+    await loadJobs();
+}
+
+async function resumeJob(id) {
+    await api('POST', `/api/jobs/${id}/resume`);
+    await loadJobs();
+}
+
+async function deleteJob(id, status) {
+    const label = status === 'cancelled' ? 'permanently delete' : 'cancel';
+    if (!confirm(`Are you sure you want to ${label} this job?`)) return;
+    const perm = status === 'cancelled' ? '?permanent=true' : '';
+    await api('DELETE', `/api/jobs/${id}${perm}`);
+    await loadJobs();
+    await loadHistory();
+}
+
+// ── Modal ──
+function openCreateModal() {
+    document.getElementById('modal-title').textContent = 'Create New Job';
+    document.getElementById('edit-job-id').value = '';
+    document.getElementById('f-name').value = '';
+    document.getElementById('f-type-interval').checked = true;
+    toggleTypeFields();
+    document.getElementById('f-run-at').value = '';
+    document.getElementById('f-interval').value = 4;
+    document.getElementById('f-country').value = 'US';
+    document.getElementById('f-category').value = 'Sports';
+    document.getElementById('f-wp-status').value = 'draft';
+    hideError();
+    document.getElementById('modal-overlay').classList.add('open');
+}
+
+function editJob(id) {
+    const j = allJobs.find(x => x.id === id);
+    if (!j) return;
+    document.getElementById('modal-title').textContent = 'Edit Job';
+    document.getElementById('edit-job-id').value = id;
+    document.getElementById('f-name').value = j.name || '';
+    if (j.job_type === 'alarm') {
+        document.getElementById('f-type-alarm').checked = true;
+    } else {
+        document.getElementById('f-type-interval').checked = true;
+    }
+    toggleTypeFields();
+    // Format datetime for the input
+    if (j.run_at) {
+        document.getElementById('f-run-at').value = j.run_at.slice(0,16);
+    } else {
+        document.getElementById('f-run-at').value = '';
+    }
+    document.getElementById('f-interval').value = j.interval_hours || 4;
+    document.getElementById('f-country').value = j.country || 'US';
+    document.getElementById('f-category').value = j.category_name || 'Sports';
+    document.getElementById('f-wp-status').value = j.wordpress_status || 'draft';
+    hideError();
+    document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+}
+
+function closeModalOutside(e) {
+    if (e.target === document.getElementById('modal-overlay')) closeModal();
+}
+
+function toggleTypeFields() {
+    const isAlarm = document.getElementById('f-type-alarm').checked;
+    document.getElementById('f-alarm-group').style.display = isAlarm ? '' : 'none';
+    document.getElementById('f-interval-group').style.display = isAlarm ? 'none' : '';
+}
+
+document.querySelectorAll('input[name="f-type"]').forEach(r => r.addEventListener('change', toggleTypeFields));
+
+function showError(msg) {
+    const el = document.getElementById('modal-error');
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+function hideError() {
+    document.getElementById('modal-error').style.display = 'none';
+}
+
+async function saveJob() {
+    hideError();
+    const id = document.getElementById('edit-job-id').value;
+    const isAlarm = document.getElementById('f-type-alarm').checked;
+    const body = {
+        name: document.getElementById('f-name').value.trim(),
+        job_type: isAlarm ? 'alarm' : 'interval',
+        run_at: isAlarm ? document.getElementById('f-run-at').value : null,
+        interval_hours: parseInt(document.getElementById('f-interval').value) || 4,
+        country: document.getElementById('f-country').value,
+        category_name: document.getElementById('f-category').value,
+        wordpress_status: document.getElementById('f-wp-status').value,
+    };
+
+    if (!body.name) { showError('Job name is required.'); return; }
+    if (isAlarm && !body.run_at) { showError('Please set a date and time for the alarm.'); return; }
+
+    try {
+        if (id) {
+            const res = await api('PUT', `/api/jobs/${id}`, body);
+            if (res.error) { showError(res.error); return; }
+        } else {
+            const res = await api('POST', '/api/jobs', body);
+            if (res.error) { showError(res.error); return; }
+        }
+        closeModal();
+        await loadJobs();
+    } catch (e) {
+        showError('Request failed: ' + e.message);
+    }
+}
+
+// ── Fast poll after manual run ──
+let fastPollCount = 0;
+let fastPollTimer = null;
+function startFastPoll() {
+    if (fastPollTimer) clearInterval(fastPollTimer);
+    fastPollCount = 0;
+    fastPollTimer = setInterval(() => {
+        loadJobs();
+        loadHistory();
+        fastPollCount++;
+        if (fastPollCount >= 24) { clearInterval(fastPollTimer); fastPollTimer = null; }
+    }, 5000);
+}
+
+// ── Utilities ──
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+}
+
+function fmtDT(iso) {
+    if (!iso) return '—';
+    try {
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true
+        });
+    } catch { return iso; }
+}
+
+function fmtCountdown(ms) {
+    const s = Math.floor(ms / 1000);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${sec}s`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+}
+
+// ── Init ──
+loadJobs();
+loadHistory();
+
+// Countdown ticker every second
+setInterval(tickCountdowns, 1000);
+
+// Background poll every 10 seconds
+setInterval(() => { loadJobs(); loadHistory(); }, 10000);
+</script>
+
+</body>
+</html>

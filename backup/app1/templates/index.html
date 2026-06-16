@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trend Agent Scheduler</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --card: #1a1d27;
+            --card-border: #2a2d3a;
+            --text: #e4e4e7;
+            --text-muted: #9ca3af;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --input-bg: #12131a;
+            --input-border: #2a2d3a;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container { max-width: 880px; margin: 0 auto; }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 2rem;
+        }
+
+        h2 { font-size: 1.75rem; font-weight: 700; color: #fff; }
+
+        .header-badge {
+            font-size: 0.7rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 20px;
+            background: rgba(99, 102, 241, 0.15);
+            color: var(--accent);
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            color: #fff;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .form-group { margin-bottom: 1.15rem; }
+
+        label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 0.35rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        select, input[type="number"], input[type="text"], input[type="datetime-local"] {
+            width: 100%;
+            padding: 0.6rem 0.8rem;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        select:focus, input:focus { border-color: var(--accent); }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .form-row-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 1rem;
+        }
+
+        /* Toggle button group */
+        .toggle-group {
+            display: flex;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--input-border);
+        }
+
+        .toggle-group input[type="radio"] { display: none; }
+
+        .toggle-group label {
+            flex: 1;
+            text-align: center;
+            padding: 0.6rem 1rem;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            text-transform: none;
+            letter-spacing: 0;
+            color: var(--text-muted);
+            background: var(--input-bg);
+            transition: all 0.2s;
+            margin-bottom: 0;
+        }
+
+        .toggle-group input[type="radio"]:checked + label {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .toggle-group label:hover { color: var(--text); }
+
+        /* Scheduler config sections */
+        .scheduler-config { margin-top: 1rem; }
+
+        .description {
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            margin-top: 0.5rem;
+            line-height: 1.5;
+        }
+
+        /* Command preview */
+        .command-preview {
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 8px;
+            padding: 0.65rem 0.85rem;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.78rem;
+            color: var(--accent-hover);
+            word-break: break-all;
+            line-height: 1.6;
+        }
+
+        .cmd-flag { color: var(--warning); }
+        .cmd-value { color: var(--success); }
+
+        /* Buttons */
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 0.7rem 1.5rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            transition: background 0.2s;
+        }
+
+        .btn-primary:hover { background: var(--accent-hover); }
+
+        .btn-run {
+            background: transparent;
+            color: var(--success);
+            border: 1px solid var(--success);
+            border-radius: 8px;
+            padding: 0.7rem 1.5rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.2s;
+        }
+
+        .btn-run:hover { background: var(--success); color: #fff; }
+
+        .button-row {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        .button-row > * { flex: 1; }
+
+        /* Status list */
+        ul.status-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        ul.status-list li {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--card-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        ul.status-list li:last-child { border-bottom: none; }
+
+        ul.status-list li strong {
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 0.82rem;
+        }
+
+        ul.status-list li span {
+            color: var(--text);
+            font-weight: 600;
+            font-size: 0.88rem;
+        }
+
+        /* Status badges */
+        .badge {
+            display: inline-block;
+            padding: 0.12rem 0.5rem;
+            border-radius: 20px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-success { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+        .badge-failed { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+        .badge-running { background: rgba(59, 130, 246, 0.15); color: var(--info); }
+        .badge-pending { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+        .badge-never { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
+        .badge-skipped { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+        .badge-stopped { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+
+        /* Active indicator */
+        .dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .dot-active { background: var(--success); box-shadow: 0 0 6px var(--success); }
+        .dot-inactive { background: var(--danger); }
+
+        @media (max-width: 600px) {
+            .form-row, .form-row-3 { grid-template-columns: 1fr; }
+            body { padding: 1rem; }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="header">
+        <h2>Trend Agent Scheduler</h2>
+        <span class="header-badge">STANDALONE</span>
+    </div>
+
+    <!-- ─── Configuration Form ─── -->
+    <form method="POST" action="/save" id="schedulerForm">
+
+        <!-- Content Settings -->
+        <div class="card">
+            <h3>Content Settings</h3>
+
+            <div class="form-row-3">
+                <div class="form-group">
+                    <label>Country</label>
+                    <select name="country" id="country">
+                        {% for c in countries %}
+                        <option value="{{ c }}" {% if c == config.country %}selected{% endif %}>{{ c }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Topic Category</label>
+                    <select name="category" id="category">
+                        {% for cat in categories %}
+                        <option value="{{ cat }}" {% if cat == config.category_name %}selected{% endif %}>{{ cat }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>WordPress Status</label>
+                    <select name="wordpress_status" id="wordpress_status">
+                        {% for s in wordpress_statuses %}
+                        <option value="{{ s }}" {% if s == config.wordpress_status %}selected{% endif %}>{{ s | capitalize }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <!-- Command Preview -->
+            <div class="form-group" style="margin-bottom:0">
+                <label>Command Preview</label>
+                <div class="command-preview" id="cmd-preview">
+                    python main.py <span class="cmd-flag">--country</span> <span class="cmd-value" id="pv-country">{{ config.country }}</span>
+                    <span class="cmd-flag">--topic-category</span> <span class="cmd-value" id="pv-category">{{ config.topic_category }}</span>
+                    <span class="cmd-flag">--wordpress-sync</span>
+                    <span class="cmd-flag">--wordpress-status</span> <span class="cmd-value" id="pv-wpstatus">{{ config.wordpress_status }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scheduler Settings -->
+        <div class="card">
+            <h3>Scheduler Settings</h3>
+
+            <!-- Type Toggle -->
+            <div class="form-group">
+                <label>Scheduler Type</label>
+                <div class="toggle-group">
+                    <input type="radio" id="type_interval" name="scheduler_type" value="interval"
+                           {% if config.scheduler_type != 'alarm' %}checked{% endif %}>
+                    <label for="type_interval">Time Interval</label>
+
+                    <input type="radio" id="type_alarm" name="scheduler_type" value="alarm"
+                           {% if config.scheduler_type == 'alarm' %}checked{% endif %}>
+                    <label for="type_alarm">Alarm (Date &amp; Time)</label>
+                </div>
+            </div>
+
+            <!-- Interval Config -->
+            <div class="scheduler-config" id="interval-config"
+                 {% if config.scheduler_type == 'alarm' %}style="display:none"{% endif %}>
+                <div class="form-group">
+                    <label>Run Every N Hours</label>
+                    <input type="number" name="interval_hours" id="interval_hours"
+                           min="1" max="168" value="{{ config.interval_hours or 4 }}">
+                </div>
+                <p class="description">
+                    Runs the pipeline every N hours. The first run starts after the first interval elapses.
+                </p>
+            </div>
+
+            <!-- Alarm Config -->
+            <div class="scheduler-config" id="alarm-config"
+                 {% if config.scheduler_type != 'alarm' %}style="display:none"{% endif %}>
+                <div class="form-group">
+                    <label>Schedule Date &amp; Time</label>
+                    <input type="datetime-local" name="alarm_datetime" id="alarm_datetime"
+                           value="{{ config.alarm_datetime or '' }}">
+                </div>
+                <p class="description">
+                    Runs the pipeline once at the specified date and time.
+                    The time must be in the future — past times will be rejected.
+                </p>
+            </div>
+
+            <!-- Enable/Disable -->
+            <div class="form-group">
+                <label>Enabled</label>
+                <div class="toggle-group">
+                    <input type="radio" id="enabled_true" name="scheduler_enabled" value="true"
+                           {% if config.scheduler_enabled != false %}checked{% endif %}>
+                    <label for="enabled_true">Enabled</label>
+
+                    <input type="radio" id="enabled_false" name="scheduler_enabled" value="false"
+                           {% if config.scheduler_enabled == false %}checked{% endif %}>
+                    <label for="enabled_false">Disabled</label>
+                </div>
+            </div>
+
+            <div class="button-row">
+                <button type="submit" class="btn-primary">Save &amp; Apply</button>
+                <button type="button" class="btn-run" onclick="runNow()">Run Now</button>
+            </div>
+        </div>
+    </form>
+
+    <!-- ─── Current Config ─── -->
+    <div class="card">
+        <h3>Current Configuration</h3>
+        <ul class="status-list">
+            <li>
+                <strong>Country</strong>
+                <span id="cfg-country">{{ config.country }}</span>
+            </li>
+            <li>
+                <strong>Category</strong>
+                <span id="cfg-category">{{ config.category_name }} ({{ config.topic_category }})</span>
+            </li>
+            <li>
+                <strong>WordPress Status</strong>
+                <span id="cfg-wp-status">{{ config.wordpress_status | capitalize }}</span>
+            </li>
+            <li>
+                <strong>Scheduler</strong>
+                <span id="cfg-scheduler">
+                    {% if config.scheduler_type == 'alarm' %}
+                        Alarm — {{ config.alarm_datetime or 'Not set' }}
+                    {% else %}
+                        Interval — every {{ config.interval_hours }}h
+                    {% endif %}
+                </span>
+            </li>
+            <li>
+                <strong>Status</strong>
+                <span id="cfg-status">
+                    <span class="dot {% if config.scheduler_enabled != false %}dot-active{% else %}dot-inactive{% endif %}"></span>
+                    {% if config.scheduler_enabled != false %}Active{% else %}Stopped{% endif %}
+                </span>
+            </li>
+        </ul>
+    </div>
+
+    <!-- ─── Last Run Status ─── -->
+    <div class="card">
+        <h3>Last Run Status</h3>
+        <ul class="status-list">
+            <li>
+                <strong>Triggered At</strong>
+                <span id="st-triggered">{{ status.last_triggered_at or 'N/A' }}</span>
+            </li>
+            <li>
+                <strong>Pipeline (main.py)</strong>
+                <span id="st-main-status"><span class="badge badge-{{ status.last_main_status }}">{{ status.last_main_status }}</span></span>
+            </li>
+            <li>
+                <strong>Pipeline Finished</strong>
+                <span id="st-main-at">{{ status.last_main_at or 'N/A' }}</span>
+            </li>
+            <li>
+                <strong>Run ID</strong>
+                <span id="st-run-id">{{ status.last_main_run_id or 'N/A' }}</span>
+            </li>
+            <li>
+                <strong>Publish (API)</strong>
+                <span id="st-publish-status"><span class="badge badge-{{ status.last_publish_status }}">{{ status.last_publish_status }}</span></span>
+            </li>
+            <li>
+                <strong>Publish Finished</strong>
+                <span id="st-publish-at">{{ status.last_publish_at or 'N/A' }}</span>
+            </li>
+            <li>
+                <strong>Published HTML</strong>
+                <span id="st-publish-html">{{ status.last_publish_html or 'N/A' }}</span>
+            </li>
+            <li>
+                <strong>Last Error</strong>
+                <span id="st-last-error" style="color: {% if status.last_error and status.last_error != 'None' %}var(--danger){% else %}var(--text-muted){% endif %}">
+                    {{ status.last_error or 'None' }}
+                </span>
+            </li>
+        </ul>
+    </div>
+
+</div>
+
+<script>
+    // ── Scheduler type toggle ──
+    const typeInterval = document.getElementById('type_interval');
+    const typeAlarm = document.getElementById('type_alarm');
+    const intervalConfig = document.getElementById('interval-config');
+    const alarmConfig = document.getElementById('alarm-config');
+
+    function toggleView() {
+        intervalConfig.style.display = typeInterval.checked ? '' : 'none';
+        alarmConfig.style.display = typeAlarm.checked ? '' : 'none';
+    }
+
+    typeInterval.addEventListener('change', toggleView);
+    typeAlarm.addEventListener('change', toggleView);
+
+    // ── Live command preview ──
+    const countryEl = document.getElementById('country');
+    const categoryEl = document.getElementById('category');
+    const wpStatusEl = document.getElementById('wordpress_status');
+    const pvCountry = document.getElementById('pv-country');
+    const pvCategory = document.getElementById('pv-category');
+    const pvWpStatus = document.getElementById('pv-wpstatus');
+
+    function updatePreview() {
+        if (pvCountry) pvCountry.textContent = countryEl.value;
+        // Map display name to CLI value
+        const catMap = {
+            'Politics': 'politics',
+            'Sports': 'sports',
+            'Business & Finance': 'business',
+            'Travel': 'travel',
+            'Technology': 'tech'
+        };
+        if (pvCategory) pvCategory.textContent = catMap[categoryEl.value] || categoryEl.value.toLowerCase();
+        if (pvWpStatus) pvWpStatus.textContent = wpStatusEl.value;
+    }
+
+    countryEl.addEventListener('change', updatePreview);
+    categoryEl.addEventListener('change', updatePreview);
+    wpStatusEl.addEventListener('change', updatePreview);
+
+    // ── Run Now ──
+    function runNow() {
+        if (!confirm('Run the pipeline now?')) return;
+        fetch('/run-now', { method: 'POST' })
+            .then(r => r.json())
+            .then(d => {
+                alert(d.message);
+                // Immediately poll for updated status
+                pollStatus();
+                // Keep polling for 2 minutes while the job runs
+                let pollCount = 0;
+                const runInterval = setInterval(() => {
+                    pollStatus();
+                    pollCount++;
+                    if (pollCount >= 24) clearInterval(runInterval); // 24 x 5s = 2min
+                }, 5000);
+            })
+            .catch(e => alert('Failed: ' + e));
+    }
+
+    // ── Auto-refresh status via /api/status ──
+    let lastStatusSnapshot = '';
+
+    function pollStatus() {
+        fetch('/api/status')
+            .then(r => r.json())
+            .then(data => {
+                const cfg = data.config || {};
+                const st = data.status || {};
+
+                // Snapshot to avoid unnecessary DOM updates
+                const snapshot = JSON.stringify(data);
+                if (snapshot === lastStatusSnapshot) return;
+                lastStatusSnapshot = snapshot;
+
+                // ── Update Current Configuration ──
+                const cfgCountry = document.getElementById('cfg-country');
+                const cfgCategory = document.getElementById('cfg-category');
+                const cfgWpStatus = document.getElementById('cfg-wp-status');
+                const cfgScheduler = document.getElementById('cfg-scheduler');
+                const cfgStatusEl = document.getElementById('cfg-status');
+
+                if (cfgCountry) cfgCountry.textContent = cfg.country || 'N/A';
+                if (cfgCategory) cfgCategory.textContent = `${cfg.category_name || 'N/A'} (${cfg.topic_category || 'N/A'})`;
+                if (cfgWpStatus) cfgWpStatus.textContent = (cfg.wordpress_status || 'draft').charAt(0).toUpperCase() + (cfg.wordpress_status || 'draft').slice(1);
+
+                if (cfgScheduler) {
+                    if (cfg.scheduler_type === 'alarm') {
+                        cfgScheduler.textContent = `Alarm — ${cfg.alarm_datetime || 'Not set'}`;
+                    } else {
+                        cfgScheduler.textContent = `Interval — every ${cfg.interval_hours || 4}h`;
+                    }
+                }
+
+                if (cfgStatusEl) {
+                    const isEnabled = cfg.scheduler_enabled !== false;
+                    cfgStatusEl.innerHTML = `<span class="dot ${isEnabled ? 'dot-active' : 'dot-inactive'}"></span>${isEnabled ? 'Active' : 'Stopped'}`;
+                }
+
+                // ── Update Last Run Status ──
+                const mainStatus = st.last_main_status || 'never';
+                const publishStatus = st.last_publish_status || 'never';
+
+                const stTriggered = document.getElementById('st-triggered');
+                const stMainStatus = document.getElementById('st-main-status');
+                const stMainAt = document.getElementById('st-main-at');
+                const stRunId = document.getElementById('st-run-id');
+                const stPublishStatus = document.getElementById('st-publish-status');
+                const stPublishAt = document.getElementById('st-publish-at');
+                const stPublishHtml = document.getElementById('st-publish-html');
+                const stLastError = document.getElementById('st-last-error');
+
+                if (stTriggered) stTriggered.textContent = st.last_triggered_at || 'N/A';
+                if (stMainStatus) stMainStatus.innerHTML = `<span class="badge badge-${mainStatus}">${mainStatus}</span>`;
+                if (stMainAt) stMainAt.textContent = st.last_main_at || 'N/A';
+                if (stRunId) stRunId.textContent = st.last_main_run_id || 'N/A';
+                if (stPublishStatus) stPublishStatus.innerHTML = `<span class="badge badge-${publishStatus}">${publishStatus}</span>`;
+                if (stPublishAt) stPublishAt.textContent = st.last_publish_at || 'N/A';
+                if (stPublishHtml) stPublishHtml.textContent = st.last_publish_html || 'N/A';
+                if (stLastError) {
+                    const hasError = st.last_error && st.last_error !== 'None';
+                    stLastError.textContent = st.last_error || 'None';
+                    stLastError.style.color = hasError ? 'var(--danger)' : 'var(--text-muted)';
+                }
+            })
+            .catch(() => {});
+    }
+
+    // Poll every 10 seconds for live updates
+    setInterval(pollStatus, 10000);
+    // Also poll immediately on page load
+    pollStatus();
+</script>
+
+</body>
+
+</html>

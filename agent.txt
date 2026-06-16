@@ -1,0 +1,4587 @@
+------------
+Generator agent
+from __future__ import annotations
+
+from html import escape
+import json
+from pathlib import Path
+import re
+from urllib.parse import urlsplit
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
+
+try:
+    from markdown import markdown as render_markdown
+except ImportError:
+    render_markdown = None
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import ContentPlan, GeneratedArticle, ResearchPacket, TrendTopic
+from ..base import AgentContext, BaseAgent
+from ..helpers import normalize_topic_category, slugify, tokenize
+
+
+class BlogGenerationService:
+    ALLOWED_GUTENBERG_BLOCKS = {"heading", "paragraph", "list", "quote", "separator", "image"}
+    GENERIC_KEYWORD_TOKENS = {
+        "bank", "news", "video", "clip", "live", "story", "stories", "latest", "update", "updates",
+        "report", "reports", "analysis", "topic",
+    }
+    SPORTS_TOKENS = {
+        "match", "game", "series", "playoff", "playoffs", "final", "finals", "nba", "nfl", "mlb", "nhl",
+        "tennis", "soccer", "football", "baseball", "inning", "goal", "set", "tournament",
+    }
+    POLITICS_TOKENS = {
+        "election", "elections", "trump", "biden", "senate", "congress", "government",
+        "policy", "policies", "president", "minister", "parliament", "tariff", "vote", "voting",
+        "campaign", "diplomacy", "diplomatic", "republican", "democrat", "geopolitics", "geopolitical",
+        "primary", "runoff", "governor", "incumbent", "court", "justice",
+    }
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+    def generate(self, topic: TrendTopic, research: ResearchPacket, plan: ContentPlan) -> GeneratedArticle:
+        if self.config.mock_mode or Groq is None or not self.config.groq_api_key:
+            return self._mock_article(topic, research, plan)
+
+        best_article: GeneratedArticle | None = None
+        best_score = -1
+        last_error: Exception | None = None
+
+        for route in self._generation_routes():
+            try:
+                article = self._generate_with_route(route, topic, research, plan)
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            article_score = self._draft_score(article)
+            if article_score > best_score:
+                best_article = article
+                best_score = article_score
+
+            if self._is_publish_ready_draft(article):
+                return article
+
+        if best_article is not None:
+            return best_article
+        if last_error is not None:
+            raise last_error
+        return self._mock_article(topic, research, plan)
+
+    def _generation_routes(self) -> list[dict[str, str]]:
+        routes: list[dict[str, str]] = []
+
+        if self.config.groq_api_key:
+            routes.append(
+                {
+                    "label": "primary",
+                    "api_key": self.config.groq_api_key,
+                    "model": self.config.groq_model,
+                }
+            )
+
+        fallback_api_key = self.config.groq_fallback_api_key or self.config.groq_api_key
+        fallback_model = self.config.groq_fallback_model or self.config.groq_model
+        fallback_route = {
+            "label": "fallback",
+            "api_key": fallback_api_key or "",
+            "model": fallback_model,
+        }
+        if fallback_route["api_key"] and fallback_route not in routes:
+            routes.append(fallback_route)
+
+        return routes
+
+    def _generate_with_route(
+        self,
+        route: dict[str, str],
+        topic: TrendTopic,
+        research: ResearchPacket,
+        plan: ContentPlan,
+    ) -> GeneratedArticle:
+        client = Groq(api_key=route["api_key"])
+        article = self._request_article(client, route["model"], topic, research, plan)
+        if self._is_publish_ready_draft(article):
+            return article
+
+        expanded_article = self._request_article(
+            client,
+            route["model"],
+            topic,
+            research,
+            plan,
+            retry_instruction=(
+                f"The previous draft was only {self._word_count(article.article_html or article.article_markdown)} words or missed the required structure. "
+                f"Regenerate the full article and make it at least {self._target_word_count()} words. "
+                "Keep the H2 structure clean, avoid unnecessary H3 subheads, ensure the Gutenberg blocks are valid, and fully develop every section."
+            ),
+        )
+        if self._draft_score(expanded_article) > self._draft_score(article):
+            return expanded_article
+        return article
+
+    def _request_article(
+        self,
+        client: Groq,
+        model: str,
+        topic: TrendTopic,
+        research: ResearchPacket,
+        plan: ContentPlan,
+        retry_instruction: str | None = None,
+    ) -> GeneratedArticle:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a newsroom writer producing WordPress-ready news copy. Return JSON only. "
+                            "Ground all claims in the supplied research, attribute major assertions, and do not invent facts."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_prompt(topic, research, plan, retry_instruction=retry_instruction),
+                    },
+                ],
+                temperature=0.3,
+                top_p=0.9,
+                max_completion_tokens=self._max_completion_tokens(),
+                stream=False,
+            )
+        except Exception as exc:
+            if self._looks_like_completion_budget_error(exc):
+                response = client.chat.completions.create(
+                    model=model,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a newsroom writer producing WordPress-ready news copy. Return JSON only. "
+                                "Ground all claims in the supplied research, attribute major assertions, and do not invent facts."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": self._build_prompt(topic, research, plan, retry_instruction=retry_instruction),
+                        },
+                    ],
+                    temperature=0.3,
+                    top_p=0.9,
+                    max_completion_tokens=self._max_completion_tokens(expanded=True),
+                    stream=False,
+                )
+            elif self._looks_like_request_budget_error(exc):
+                raise RuntimeError(
+                    "Groq rejected the request because the combined prompt and completion budget was too large. "
+                    "Try a smaller model, fewer research results, or a lower article word target."
+                ) from exc
+            else:
+                raise
+        content = response.choices[0].message.content or "{}"
+        content = content.replace("```json", "").replace("```", "").strip()
+        payload = json.loads(content)
+        return self._coerce_article(payload, topic, research, plan)
+
+    def _build_prompt(
+        self,
+        topic: TrendTopic,
+        research: ResearchPacket,
+        plan: ContentPlan,
+        retry_instruction: str | None = None,
+    ) -> str:
+        internal_article = self._select_internal_article(topic)
+        prompt_sources = self._select_prompt_sources(research)
+        source_digest = "\n".join(
+            "\n".join(
+                [
+                    f"Source {index}: {self._trim_text(source.title, 140)}",
+                    f"Publisher: {self._trim_text(source.publisher, 60)}",
+                    f"Snippet: {self._trim_text(source.snippet, 220)}",
+                    f"Extract: {self._trim_text(source.content, 260)}",
+                ]
+            )
+            for index, source in enumerate(prompt_sources, start=1)
+        )
+        allowed_sources = "\n".join(
+            f"- {self._trim_text(source.title, 100)} | {source.url}"
+            for source in prompt_sources
+            if source.url
+        )
+        facts = "\n".join(f"- {self._trim_text(fact, 220)}" for fact in research.facts[: len(prompt_sources)])
+        present_facts = "\n".join(f"- {self._trim_text(fact, 220)}" for fact in research.present)
+        past_facts = "\n".join(f"- {self._trim_text(fact, 220)}" for fact in research.past)
+        future_facts = "\n".join(f"- {self._trim_text(fact, 220)}" for fact in research.future)
+        claim_lines = "\n".join(
+            f"- [{claim.section}/{claim.source_tier}] {self._trim_text(claim.claim, 220)} | {claim.source_title} | {claim.source_url}"
+            for claim in research.claims[:6]
+        )
+        context_reference_lines = "\n".join(
+            f"- {reference.entity} | {reference.url} | {self._trim_text(reference.title or reference.snippet or reference.entity, 120)}"
+            for reference in research.context_references
+        )
+        sections = "\n".join(f"- {section}" for section in plan.sections)
+        section_instruction = "Use these section goals as internal guidance and rewrite them into story-specific H2 headings:"
+        if plan.article_type == "politics_news":
+            section_instruction = "Use this flat section order and rewrite each goal into a concise, story-specific H2 heading for the visible article, with no extra subtopics or nested headings. If a section goal already gives a strong implication angle, stay close to that source-driven idea:"
+        secondary_keywords = ", ".join(plan.secondary_keywords)
+        retry_block = f"\nRetry instruction:\n{retry_instruction}\n" if retry_instruction else ""
+        research_context = self._trim_text(research.context, 900)
+        memory_notes = "\n".join(f"- {note}" for note in plan.memory_notes)
+        memory_block = f"\nEditorial memory:\n{memory_notes}\n" if memory_notes else ""
+        internal_article_block = (
+            f"\nInternal article suggestion:\n- {internal_article['title']} | {internal_article['url']}\n"
+            if internal_article
+            else "\nInternal article suggestion:\n- none available; do not invent one.\n"
+        )
+
+        return f"""
+Topic: {topic.keyword}
+Audience: {plan.audience}
+Tone: {plan.tone}
+Article type: {plan.article_type}
+Primary keyword: {plan.primary_keyword}
+Secondary keywords: {secondary_keywords}
+Brief: {plan.brief}
+
+{section_instruction}
+{sections}
+
+Grounding facts:
+{facts}
+
+Lead fact:
+- {self._trim_text(research.lead, 220)}
+
+Present developments:
+{present_facts}
+
+Past background:
+{past_facts}
+
+What comes next:
+{future_facts}
+
+Attributed claims:
+{claim_lines}
+
+Context references:
+{context_reference_lines}
+
+Research summary:
+{research_context}
+
+Condensed source digest:
+{source_digest}
+
+{memory_block}
+
+{internal_article_block}
+
+{retry_block}
+
+Allowed sources:
+{allowed_sources}
+
+Return one valid JSON object with exactly these keys:
+- catchy_title: string and must start with the primary keyword naturally
+- seo_keywords: array of strings
+- meta_description: string under 160 characters and include the primary keyword
+- blog_outline: array of strings
+- article_markdown: string containing a concise internal review outline in Markdown using H1/H2 headings and short bullet points only
+- article_html: string containing WordPress-ready Gutenberg block markup
+- image_prompts: array of exactly 3 strings
+
+Hard requirements:
+- article_html must be wrapped in <article class="trend-agent-post">...</article>
+- Inside the article, use only core Gutenberg block comments for these blocks: heading, paragraph, list, quote, separator
+- Every visible heading or paragraph must be inside Gutenberg block delimiters like <!-- wp:heading --> ... <!-- /wp:heading -->
+- Use exactly one <h1> near the top and include the primary keyword naturally in that H1
+- Use 1 to 2 substantive <h2> sections before the final Sources section.
+- Make at least one substantive <h2> include the primary keyword or a very close synonym naturally.
+- Do not use any <h3>, <h4>, or deeper headings.
+- Write as a news article, not a trend explainer. Do not use headings such as "Why this topic is trending now" or filler framing about virality.
+- The opening paragraph must state the newest confirmed development and include the core reported fact pattern: who, what office or event, and one concrete result or number when available.
+- When a second substantive section is used, it should explain why the development matters now or what it changes.
+- The body should clearly connect present developments, relevant past context, and any next-step context without creating a separate template-style section just for forward-looking filler.
+- Keep headings specific to the story. Avoid mechanical labels and avoid stacking multiple subheadings unless the story genuinely needs them.
+- Do not reuse the section-goal text verbatim as visible headings.
+- For sports stories, do not use the literal heading "Why This Matters Now". Rewrite the second H2 around the game, series, matchup, or playoff stakes.
+- For politics stories, use exactly two substantive <h2> sections before Sources: first the political shift or result, then what it means for the party, race, or governing stakes.
+- For politics stories, do not use the literal headings "The Political Shift" or "What This Means Now". Rewrite them into story-specific headings that name the state, party, office, or race when that information is available.
+- Attribute major claims in the prose with phrases such as "according to" or "the outlet reported" when the source matters.
+- Use at least two attributed source references in the body before the final Sources section whenever two or more reporting links are available.
+- Use 2 to 3 inline background/reference links in the body when two or more relevant context references are supplied.
+- Use context references as inline background links when they clarify a named person, institution, place, or event mentioned in the article.
+- Do not place source-only citation paragraphs such as "[1] source title" inside the body. Keep reporting links in attributed prose and in the final Sources section only.
+- Add a final public Sources section at the bottom using the supplied reporting links.
+- External links are allowed in inline context references, in the final Sources section, and in one allowed internal Also Read link when provided.
+- If an internal article suggestion is provided, insert one short mid-article Also Read callout after the first 2 or 3 paragraphs using only that title and URL. Render it as a paragraph callout, not as a heading.
+- If no internal article suggestion is provided, do not invent an Also Read link.
+- article_markdown is for internal review only, so keep it compact: headings plus short bullets, not full article prose
+- Write at least {self._target_word_count()} words
+- Keep paragraphs short: 2 to 3 sentences each.
+- Keep most sentences under 20 words where possible; break long compound sentences into two shorter ones.
+- Prefer active voice and direct verbs over passive constructions.
+- Avoid unsourced speculation. Do not use words like "may", "could", or "likely" unless the sentence is clearly attributed.
+- Do not include scripts, styles, code fences, or placeholder markup
+- Do not add citations or claims that are not supported by the provided facts
+- Do not wrap the JSON in code fences
+- Do not add text before or after the JSON
+""".strip()
+
+    def _target_word_count(self) -> int:
+        return max(self.config.min_article_words + 150, int(self.config.min_article_words * 1.2))
+
+    def _max_completion_tokens(self, expanded: bool = False) -> int:
+        ceiling = 5600 if expanded else 4600
+        return min(ceiling, max(1800, int(self._target_word_count() * 2.8)))
+
+    def _select_prompt_sources(self, research: ResearchPacket):
+        prompt_sources = [source for source in research.sources if source.title or source.snippet or source.content]
+        if not prompt_sources:
+            return research.sources[:2]
+        return prompt_sources[:4]
+
+    def _word_count(self, article_body: str) -> int:
+        visible_text = re.sub(r"<[^>]+>", " ", article_body)
+        return len(re.findall(r"\b\w+\b", visible_text))
+
+    def _draft_score(self, article: GeneratedArticle) -> int:
+        body = article.article_html or article.article_markdown
+        h2_count = len(re.findall(r"<h2\b", body, flags=re.IGNORECASE))
+        return (
+            self._word_count(body)
+            + 100 * min(h2_count, 3)
+            - 75 * max(0, h2_count - 3)
+            - 50 * len(re.findall(r"<h3\b", body, flags=re.IGNORECASE))
+            + 100 * len(re.findall(r"<!--\s*wp:", body, flags=re.IGNORECASE))
+        )
+
+    def _is_publish_ready_draft(self, article: GeneratedArticle) -> bool:
+        body = article.article_html or article.article_markdown
+        words = self._word_count(body)
+        h1_count = len(re.findall(r"<h1\b", body, flags=re.IGNORECASE))
+        h2_count = len(re.findall(r"<h2\b", body, flags=re.IGNORECASE))
+        has_gutenberg_blocks = bool(re.search(r"<!--\s*wp:", body, flags=re.IGNORECASE))
+        return (
+            words >= self._target_word_count()
+            and h1_count == 1
+            and 2 <= h2_count <= 3
+            and has_gutenberg_blocks
+        )
+
+    def _trim_text(self, value: str, limit: int) -> str:
+        normalized = re.sub(r"\s+", " ", value or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+    def _trim_to_length(self, value: str, limit: int) -> str:
+        normalized = re.sub(r"\s+", " ", value or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+
+        shortened = normalized[: limit + 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        if shortened:
+            return shortened
+        return normalized[:limit].rstrip(" ,;:-")
+
+    def _looks_like_request_budget_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "request too large" in message or ("413" in message and "token" in message)
+
+    def _looks_like_completion_budget_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "json_validate_failed" in message or "max completion tokens reached" in message
+
+    def _coerce_article(
+        self,
+        payload: dict,
+        topic: TrendTopic,
+        research: ResearchPacket,
+        plan: ContentPlan,
+    ) -> GeneratedArticle:
+        article = GeneratedArticle(
+            catchy_title=str(payload.get("catchy_title") or f"{topic.keyword}: What it means right now"),
+            seo_keywords=[str(item) for item in payload.get("seo_keywords", [])] or [plan.primary_keyword],
+            meta_description=str(
+                payload.get("meta_description")
+                or f"A grounded breakdown of {topic.keyword} using current sources and practical analysis."
+            ),
+            blog_outline=[str(item) for item in payload.get("blog_outline", [])] or plan.sections,
+            article_markdown=str(payload.get("article_markdown") or "").strip(),
+            article_html=str(payload.get("article_html") or "").strip(),
+            image_prompts=[str(item) for item in payload.get("image_prompts", [])][:3],
+        )
+
+        focus_keyword = self._normalize_focus_keyword(plan.primary_keyword, topic)
+        article.seo_keywords = self._normalize_seo_keywords(article.seo_keywords, focus_keyword, plan)
+        article.catchy_title = self._normalize_catchy_title(article.catchy_title, focus_keyword, topic)
+        article.meta_description = self._normalize_meta_description(article.meta_description, focus_keyword, topic)
+
+        if len(article.image_prompts) < 3:
+            article.image_prompts.extend(
+                [
+                    f"Editorial cover image for {topic.keyword}",
+                    f"Explainer graphic showing the drivers behind {topic.keyword}",
+                    f"Professional thumbnail illustrating the business impact of {topic.keyword}",
+                ][len(article.image_prompts):]
+            )
+
+        if not article.article_markdown:
+            article.article_markdown = self._build_markdown_fallback(article.catchy_title, article.blog_outline, research)
+
+        if not article.article_html:
+            article.article_html = self._render_wordpress_html(article.article_markdown)
+
+        article.article_html = self._normalize_article_html(
+            article.article_html,
+            research,
+            topic,
+            focus_keyword=focus_keyword,
+            title=article.catchy_title,
+        )
+        article.article_markdown = self._normalize_article_markdown(
+            article.article_markdown,
+            topic,
+            title=article.catchy_title,
+        )
+
+        return article
+
+    def _normalize_focus_keyword(self, focus_keyword: str, topic: TrendTopic) -> str:
+        cleaned = re.sub(r"\s+", " ", focus_keyword or "").strip()
+        if cleaned:
+            return cleaned
+        return re.sub(r"\s+", " ", topic.keyword or "").strip()
+
+    def _focus_keyword_content_word_count(self, focus_keyword: str | None) -> int:
+        stop_tokens = {"the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "at", "by", "with", "from"}
+        count = 0
+        for word in re.split(r"\s+", focus_keyword or ""):
+            normalized = re.sub(r"[^a-z0-9-]", "", word.casefold())
+            if normalized and normalized not in stop_tokens:
+                count += 1
+        return count
+
+    def _normalize_seo_keywords(self, seo_keywords: list[str], focus_keyword: str, plan: ContentPlan) -> list[str]:
+        ordered = [focus_keyword, *seo_keywords, *plan.secondary_keywords]
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for keyword in ordered:
+            candidate = re.sub(r"\s+", " ", keyword or "").strip()
+            if not candidate:
+                continue
+            candidate_key = candidate.casefold()
+            if candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            normalized.append(candidate)
+        return normalized[:8]
+
+    def _normalize_catchy_title(self, title: str, focus_keyword: str, topic: TrendTopic) -> str:
+        focus_display = self._display_focus_keyword(focus_keyword)
+        normalized = re.sub(r"\s+", " ", title or "").strip(" :-")
+        if not normalized:
+            normalized = f"{focus_display}: what changed and why it matters"
+            return self._shorten_seo_title(normalized, focus_keyword)
+        if self._has_exact_focus_prefix(normalized, focus_keyword):
+            return self._shorten_seo_title(normalized, focus_keyword)
+
+        tail = ""
+        for separator in [":", " - ", " | "]:
+            if separator in normalized:
+                tail = normalized.split(separator, 1)[1].strip()
+                break
+        if not tail:
+            tail = normalized
+        if tail.casefold().startswith(topic.keyword.casefold()):
+            tail = tail[len(topic.keyword):].strip(" :-") or tail
+        tail = self._dedupe_leading_focus_terms(tail, focus_keyword)
+        if not tail:
+            tail = "what changed and why it matters"
+        return self._shorten_seo_title(f"{focus_display}: {tail}", focus_keyword)
+
+    def _has_exact_focus_prefix(self, title: str, focus_keyword: str) -> bool:
+        normalized_title = re.sub(r"\s+", " ", title or "").strip()
+        normalized_focus = re.sub(r"\s+", " ", focus_keyword or "").strip()
+        if not normalized_title or not normalized_focus:
+            return False
+        if not normalized_title.casefold().startswith(normalized_focus.casefold()):
+            return False
+        if len(normalized_title) == len(normalized_focus):
+            return True
+        next_char = normalized_title[len(normalized_focus)]
+        return next_char.isspace() or next_char in {":", "-", "|", ",", "(", "/"}
+
+    def _normalize_meta_description(self, meta_description: str, focus_keyword: str, topic: TrendTopic) -> str:
+        focus_display = self._display_focus_keyword(focus_keyword)
+        normalized = re.sub(r"\s+", " ", meta_description or "").strip()
+        if not normalized:
+            normalized = f"{topic.keyword}: what changed and why the latest development matters now."
+        if focus_keyword.casefold() not in normalized.casefold():
+            normalized = f"{focus_display}: {normalized}"
+
+        prefix = f"{focus_display}: "
+        if normalized.casefold().startswith(prefix.casefold()):
+            tail = self._dedupe_leading_focus_terms(normalized[len(prefix):], focus_keyword)
+            replacements = [
+                (r"\bcampaign gains traction\b", "campaign gains ground"),
+                (r"\bState Sen\.\b", "Sen."),
+                (r"\bgovernor's race\b", "governor race"),
+                (r"\bwhile\b", "as"),
+            ]
+            for pattern, replacement in replacements:
+                tail = re.sub(pattern, replacement, tail, flags=re.IGNORECASE)
+            normalized = f"{prefix}{tail.strip()}"
+
+        normalized = self._reduce_speculative_language(normalized)
+
+        return self._trim_to_length(normalized, 145)
+
+    def _display_focus_keyword(self, focus_keyword: str) -> str:
+        parts: list[str] = []
+        for token in focus_keyword.split():
+            if token.isupper() or token.lower() in {"boe", "fed", "doj", "fda", "sec", "eu", "uk", "us"}:
+                parts.append(token.upper())
+            else:
+                parts.append(token.capitalize())
+        return " ".join(parts)
+
+    def _dedupe_leading_focus_terms(self, value: str, focus_keyword: str) -> str:
+        normalized = re.sub(r"\s+", " ", value or "").strip(" :-")
+        focus_parts = self._display_focus_keyword(focus_keyword).split()
+        prefixes: list[str] = []
+        if focus_parts:
+            prefixes.append(" ".join(focus_parts))
+        if len(focus_parts) >= 2:
+            prefixes.append(" ".join(focus_parts[:2]))
+        if focus_parts:
+            prefixes.append(focus_parts[0])
+
+        for prefix in prefixes:
+            normalized = re.sub(
+                rf"^{re.escape(prefix)}(?:['’]s)?\s+",
+                "",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        normalized = re.sub(r"^['’]s\s+", "", normalized, flags=re.IGNORECASE)
+        return normalized.strip(" :-")
+
+    def _shorten_seo_title(self, title: str, focus_keyword: str) -> str:
+        normalized = re.sub(r"\s+", " ", title or "").strip(" :-")
+        max_length = 58
+        if len(normalized) <= max_length:
+            return normalized
+
+        focus_display = self._display_focus_keyword(focus_keyword)
+        prefix = f"{focus_display}: "
+        if normalized.casefold().startswith(prefix.casefold()):
+            tail = self._dedupe_leading_focus_terms(normalized[len(prefix):], focus_keyword)
+        else:
+            prefix = ""
+            tail = normalized
+
+        replacements = [
+            (r"\bGains Momentum in\b", "Surges in"),
+            (r"\bwhat happened and why it matters now\b", "what changed"),
+            (r"\bwhat changed and why it matters\b", "what changed"),
+            (r"\bGovernor's Race\b", "Governor Race"),
+            (r"\bRepublican Party\b", "GOP"),
+        ]
+        for pattern, replacement in replacements:
+            tail = re.sub(pattern, replacement, tail, flags=re.IGNORECASE)
+
+        shortened = f"{prefix}{tail}".strip()
+        if len(shortened) <= max_length:
+            return shortened
+        if prefix:
+            return f"{prefix}{self._trim_to_length(tail, max_length - len(prefix))}".strip()
+        return self._trim_to_length(shortened, max_length)
+
+    def _clean_fact_sentence(self, value: str, limit: int = 110) -> str:
+        normalized = re.sub(r"\s+", " ", value or "").strip()
+        normalized = re.sub(r"^[!#*\-\s>]+", "", normalized)
+        replacements = [
+            (r"\bState Sen\.\b", "State Senator"),
+            (r"\bSen\.\b", "Senator"),
+            (r"\bGov\.\b", "Governor"),
+            (r"\bRep\.\b", "Representative"),
+            (r"\bU\.S\.\b", "US"),
+        ]
+        for pattern, replacement in replacements:
+            normalized = re.sub(pattern, replacement, normalized)
+        if not normalized:
+            return ""
+
+        sentence = re.split(r"(?<=[.!?])\s+", normalized, maxsplit=1)[0].strip()
+        sentence = sentence.rstrip(" .")
+        return self._trim_to_length(sentence, limit)
+
+    def _best_focus_fact(self, research: ResearchPacket, focus_keyword: str) -> tuple[str, str]:
+        focus_tokens = {token for token in tokenize(focus_keyword) if len(token) > 2}
+        candidates: list[tuple[str, str]] = []
+        for source in research.sources[:5]:
+            publisher = source.publisher or source.title or "the reporting"
+            for raw_text in [source.title, source.snippet, source.content]:
+                fact = self._clean_fact_sentence(raw_text)
+                if fact:
+                    candidates.append((fact, publisher))
+
+        for raw_text in [*research.present[:2], research.lead, *research.future[:1], *research.past[:1]]:
+            fact = self._clean_fact_sentence(raw_text)
+            if fact:
+                candidates.append((fact, "the latest reporting"))
+
+        if not candidates:
+            return (self._display_focus_keyword(focus_keyword), "the latest reporting")
+
+        def score(item: tuple[str, str]) -> tuple[int, int]:
+            fact, _publisher = item
+            fact_tokens = set(tokenize(fact))
+            return (sum(1 for token in focus_tokens if token in fact_tokens), -len(fact))
+
+        return max(candidates, key=score)
+
+    def _ensure_focus_keyword_intro(
+        self,
+        article_html: str,
+        research: ResearchPacket,
+        focus_keyword: str | None,
+    ) -> str:
+        if not focus_keyword:
+            return article_html
+
+        paragraph_pattern = re.compile(
+            r"(<!--\s*wp:paragraph\s*-->\s*<p>)(.*?)(</p>\s*<!--\s*/wp:paragraph\s*-->)",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        match = paragraph_pattern.search(article_html)
+        if match is None:
+            return article_html
+
+        paragraph_text = re.sub(r"<[^>]+>", " ", match.group(2))
+        paragraph_text = re.sub(r"\s+", " ", paragraph_text).strip()
+        first_sentence = re.split(r"(?<=[.!?])\s+", paragraph_text, maxsplit=1)[0]
+        if focus_keyword.casefold() in first_sentence.casefold():
+            return article_html
+
+        fact, publisher = self._best_focus_fact(research, focus_keyword)
+        intro_sentence = (
+            f"{self._display_focus_keyword(focus_keyword)} is back in focus after {publisher} reported that {fact}."
+        )
+        replacement = f"{match.group(1)}{escape(intro_sentence)}{match.group(3)}"
+        return article_html[:match.start()] + replacement + article_html[match.end():]
+
+    def _supporting_fact_candidates(self, research: ResearchPacket) -> list[tuple[str, str]]:
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        for source in research.sources[:5]:
+            fact = self._clean_fact_sentence(source.title or source.snippet or source.content)
+            if not fact:
+                continue
+            key = fact.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((fact, source.publisher or source.title or "the reporting"))
+
+        for raw_text in [*research.present[:2], *research.past[:1], *research.future[:1]]:
+            fact = self._clean_fact_sentence(raw_text)
+            if not fact:
+                continue
+            key = fact.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((fact, "the latest reporting"))
+
+        return candidates
+
+    def _expand_short_article(
+        self,
+        article_html: str,
+        research: ResearchPacket,
+        topic: TrendTopic | None,
+        focus_keyword: str | None,
+    ) -> str:
+        if topic is None or not focus_keyword:
+            return article_html
+
+        min_words = max(320, min(self.config.min_article_words, 360))
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        if self._word_count(article_body) >= min_words:
+            return article_html
+
+        focus_display = self._density_replacement_phrase(focus_keyword or (topic.keyword if topic is not None else "the story"))
+        additions: list[str] = []
+
+        for fact, publisher in self._supporting_fact_candidates(research):
+            paragraph = (
+                f"According to {publisher}, {fact}. "
+                "That adds context before the next confirmed turn in the story."
+            )
+            additions.append(
+                f"\n<!-- wp:paragraph -->\n<p>{escape(paragraph)}</p>\n<!-- /wp:paragraph -->\n"
+            )
+            if self._word_count(article_body + "".join(additions)) >= min_words:
+                break
+
+        fallback_paragraphs = [
+            (
+                f"The latest reporting keeps the focus on {focus_display}. "
+                "Readers now have a clearer view of why this update matters."
+            ),
+            (
+                "That fuller context gives the story a clearer place in the current news cycle. "
+                "It also helps readers follow the next confirmed development with less guesswork."
+            ),
+        ]
+        for paragraph in fallback_paragraphs:
+            if self._word_count(article_body + "".join(additions)) >= min_words:
+                break
+            additions.append(
+                f"\n<!-- wp:paragraph -->\n<p>{escape(paragraph)}</p>\n<!-- /wp:paragraph -->\n"
+            )
+
+        return article_body + "".join(additions) + sources_tail
+
+    def _normalize_article_markdown(
+        self,
+        article_markdown: str,
+        topic: TrendTopic | None = None,
+        title: str | None = None,
+    ) -> str:
+        normalized = article_markdown.strip()
+        if title and re.search(r"(^|\n)#\s+.+", normalized):
+            normalized = re.sub(r"(^|\n)#\s+.+", lambda match: f"{match.group(1)}# {title}", normalized, count=1)
+        normalized = self._ensure_sources_markdown(normalized, topic)
+        if topic is None:
+            return normalized
+
+        internal_article = self._select_internal_article(topic)
+        if internal_article is None or "Also Read" in normalized:
+            return normalized
+
+        also_read_block = self._build_also_read_markdown(internal_article)
+        return normalized + f"\n\n{also_read_block}"
+
+    def _build_markdown_fallback(
+        self,
+        catchy_title: str,
+        blog_outline: list[str],
+        research: ResearchPacket,
+    ) -> str:
+        section_block = "\n\n".join(
+            f"## {section}\nSee the HTML export for the finalized WordPress-ready body."
+            for section in blog_outline
+            if section.lower() != "sources"
+        )
+        sources_block = self._build_sources_markdown(research)
+        if sources_block:
+            return f"# {catchy_title}\n\n{section_block}\n\n{sources_block}".strip()
+        return f"# {catchy_title}\n\n{section_block}".strip()
+
+    def _render_wordpress_html(self, article_markdown: str) -> str:
+        if render_markdown is None:
+            raise RuntimeError("WordPress-ready HTML generation requires the 'markdown' package")
+
+        article_html = render_markdown(article_markdown, extensions=["extra", "sane_lists"])
+        return self._wrap_article_html(self._to_gutenberg_blocks(article_html))
+
+    def _normalize_article_html(
+        self,
+        article_html: str,
+        research: ResearchPacket,
+        topic: TrendTopic | None = None,
+        *,
+        focus_keyword: str | None = None,
+        title: str | None = None,
+    ) -> str:
+        stripped = self._strip_gutenberg_comments(article_html)
+        stripped = self._flatten_nested_headings(stripped)
+        normalized = self._wrap_article_html(self._to_gutenberg_blocks(stripped))
+        normalized = self._normalize_existing_sources_section(normalized)
+        normalized = self._remove_inline_sources_blocks(normalized)
+        normalized = self._rewrite_bare_url_anchors(normalized, research)
+        normalized = self._strip_inline_source_citation_paragraphs(normalized, research)
+        normalized = self._inject_inline_context_links(normalized, research)
+        normalized = self._ensure_sources_section(normalized, research)
+        normalized = self._enforce_news_section_limit(normalized)
+        normalized = self._ensure_also_read_block(normalized, topic)
+        normalized = self._normalize_seo_headings(normalized, topic, focus_keyword=focus_keyword, title=title)
+        normalized = self._ensure_focus_keyword_intro(normalized, research, focus_keyword)
+        normalized = self._tighten_article_readability(normalized)
+        normalized = self._expand_short_article(normalized, research, topic, focus_keyword)
+        normalized = self._avoid_competing_link_anchors(normalized, research, focus_keyword)
+        normalized = self._reduce_focus_keyword_density(normalized, focus_keyword)
+        normalized = self._inject_source_image_block(normalized, research, focus_keyword)
+        return normalized
+
+    def _inject_source_image_block(
+        self,
+        article_html: str,
+        research: ResearchPacket,
+        focus_keyword: str | None,
+    ) -> str:
+        if "trend-agent-source-image" in article_html:
+            return article_html
+
+        image_source = next((source for source in research.sources if source.image_url), None)
+        if image_source is None:
+            return article_html
+
+        image_url = self._safe_http_url(image_source.image_url)
+        source_url = self._safe_http_url(image_source.url)
+        if not image_url:
+            return article_html
+
+        credit = (image_source.image_credit or image_source.publisher or self._hostname_label(image_source.url) or "Source").strip()
+        alt_text = self._source_image_alt_text(image_source, research, focus_keyword, credit)
+        caption_text = f"Image source: {credit}"
+        if source_url:
+            caption_html = (
+                f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer nofollow">'
+                f"{escape(caption_text)}"
+                "</a>"
+            )
+        else:
+            caption_html = escape(caption_text)
+
+        figure_html = (
+            "\n<!-- wp:image {\"sizeSlug\":\"large\",\"linkDestination\":\"custom\"} -->\n"
+            '<figure class="wp-block-image size-large trend-agent-source-image">'
+            f'<img src="{escape(image_url, quote=True)}" alt="{escape(alt_text, quote=True)}" loading="lazy" referrerpolicy="no-referrer" />'
+            f"<figcaption>{caption_html}</figcaption>"
+            "</figure>\n"
+            "<!-- /wp:image -->\n"
+        )
+
+        heading_match = re.search(
+            r"(<!--\s*wp:heading(?:\s+\{\"level\":1\})?\s*-->\s*<h1[^>]*>.*?</h1>\s*<!--\s*/wp:heading\s*-->)",
+            article_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if heading_match:
+            insert_at = heading_match.end()
+            return article_html[:insert_at] + figure_html + article_html[insert_at:]
+
+        article_match = re.search(r"<article[^>]*>", article_html, flags=re.IGNORECASE)
+        if article_match:
+            insert_at = article_match.end()
+            return article_html[:insert_at] + figure_html + article_html[insert_at:]
+        return figure_html + article_html
+
+    def _source_image_alt_text(self, image_source, research: ResearchPacket, focus_keyword: str | None, credit: str) -> str:
+        base_alt = (image_source.image_caption or image_source.title or research.topic or credit).strip()
+        if not focus_keyword:
+            return base_alt
+
+        if focus_keyword.casefold() in base_alt.casefold():
+            return base_alt
+
+        focus_display = self._display_focus_keyword(focus_keyword)
+        if not base_alt:
+            return focus_display
+        return f"{focus_display}: {base_alt}"
+
+    def _safe_http_url(self, value: str) -> str:
+        candidate = str(value or "").strip()
+        return candidate if candidate.startswith(("https://", "http://")) else ""
+
+    def _hostname_label(self, value: str) -> str:
+        hostname = urlsplit(value or "").netloc.strip().lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        return hostname
+
+    def _normalize_seo_headings(
+        self,
+        article_html: str,
+        topic: TrendTopic | None,
+        *,
+        focus_keyword: str | None,
+        title: str | None,
+    ) -> str:
+        normalized = article_html
+        if title:
+            normalized = re.sub(
+                r"(<h1[^>]*>)(.*?)(</h1>)",
+                lambda match: f"{match.group(1)}{escape(title)}{match.group(3)}",
+                normalized,
+                count=1,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+
+        if not focus_keyword:
+            return normalized
+
+        heading_pattern = re.compile(
+            r'(<!--\s*wp:heading(?:\s+\{[^>]*\})?\s*-->\s*<h2[^>]*>)(.*?)(</h2>\s*<!--\s*/wp:heading\s*-->)',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        matches = list(heading_pattern.finditer(normalized))
+        story_headings = [match for match in matches if re.sub(r"<[^>]+>", "", match.group(2)).strip().casefold() != "sources"]
+        if not story_headings:
+            return normalized
+
+        for index, match in enumerate(reversed(story_headings), start=1):
+            heading_text = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+            if self._heading_mentions_focus(heading_text, focus_keyword):
+                continue
+            replacement = self._focus_h2_text(heading_text, focus_keyword, index=len(story_headings) - index, topic=topic)
+            normalized = normalized[:match.start()] + match.group(1) + escape(replacement) + match.group(3) + normalized[match.end():]
+
+        return normalized
+
+    def _heading_mentions_focus(self, heading_text: str, focus_keyword: str) -> bool:
+        if focus_keyword.casefold() in heading_text.casefold():
+            return True
+        focus_tokens = [token for token in tokenize(focus_keyword) if len(token) > 2 and token not in self.GENERIC_KEYWORD_TOKENS]
+        if not focus_tokens:
+            return focus_keyword.casefold() in heading_text.casefold()
+        heading_tokens = set(tokenize(heading_text))
+        required_hits = min(2, len(focus_tokens))
+        return sum(1 for token in focus_tokens if token in heading_tokens) >= required_hits
+
+    def _focus_h2_text(self, existing_heading: str, focus_keyword: str, index: int, topic: TrendTopic | None = None) -> str:
+        focus_display = self._display_focus_keyword(focus_keyword)
+        normalized_existing = re.sub(r"\s+", " ", existing_heading).strip()
+        lower_heading = normalized_existing.casefold()
+        topic_tokens = set(tokenize(topic.keyword)) if topic is not None else set()
+        is_sports_topic = bool(topic_tokens & self.SPORTS_TOKENS)
+        use_generic_followup = self._focus_keyword_content_word_count(focus_keyword) >= 4
+        if index == 0:
+            if is_sports_topic:
+                return f"{focus_display}: the game-changing development"
+            return f"{focus_display} and the policy shift"
+        if lower_heading.startswith("what this means for "):
+            suffix = normalized_existing[len("What This Means"):].strip()
+            if not use_generic_followup:
+                return f"What {focus_display} Means {suffix}".strip()
+            return f"What this means {suffix}".strip()
+        if lower_heading.startswith("why this matters"):
+            if not use_generic_followup:
+                return f"Why {focus_display} Matters Now"
+            return "Why this matters now"
+        if " for " in lower_heading:
+            suffix = normalized_existing[lower_heading.index(" for "):]
+            if not use_generic_followup:
+                return f"What {focus_display} Means{suffix}"
+            return f"What this means{suffix}"
+        if not use_generic_followup:
+            return f"Why {focus_display} Matters Now"
+        return "Why this matters now"
+
+    def _tighten_article_readability(self, article_html: str) -> str:
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        paragraph_pattern = re.compile(
+            r"(<!--\s*wp:paragraph\s*-->\s*<p>)(.*?)(</p>\s*<!--\s*/wp:paragraph\s*-->)",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def repl(match: re.Match[str]) -> str:
+            paragraph_body = match.group(2)
+            if re.search(r"<a\b|<strong>Also Read", paragraph_body, flags=re.IGNORECASE):
+                return match.group(0)
+
+            paragraph_text = re.sub(r"<[^>]+>", "", paragraph_body)
+            paragraph_text = re.sub(r"\s+", " ", paragraph_text).strip()
+            if not paragraph_text:
+                return match.group(0)
+
+            revised = self._reduce_passive_voice(paragraph_text)
+            revised = self._reduce_speculative_language(revised)
+            revised = self._split_long_sentences(revised)
+            revised = re.sub(r"\s+", " ", revised).strip()
+            if revised == paragraph_text:
+                return match.group(0)
+            return f"{match.group(1)}{escape(revised)}{match.group(3)}"
+
+        return paragraph_pattern.sub(repl, article_body) + sources_tail
+
+    def _reduce_passive_voice(self, text: str) -> str:
+        replacements = [
+            (r"\bhas been seen as\b", "is"),
+            (r"\bhave been seen as\b", "are"),
+            (r"\bhas been described as\b", "is"),
+            (r"\bhave been described as\b", "are"),
+            (r"\bhas been attributed to\b", "stems from"),
+            (r"\bhave been attributed to\b", "stem from"),
+            (r"\bhas been marked by\b", "showed"),
+            (r"\bhave been marked by\b", "show"),
+            (r"\bhas raised questions about\b", "raises questions about"),
+            (r"\bhave raised questions about\b", "raise questions about"),
+        ]
+        normalized = text
+        for pattern, replacement in replacements:
+            normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+        return normalized
+
+    def _reduce_speculative_language(self, text: str) -> str:
+        replacements = [
+            (r"\bcould impact\b", "has implications for"),
+            (r"\bmay impact\b", "has implications for"),
+            (r"\bcould affect\b", "affects"),
+            (r"\bmay affect\b", "affects"),
+            (r"\bcould alter\b", "reshapes"),
+            (r"\bmay alter\b", "reshapes"),
+            (r"\bcould bring\b", "brings"),
+            (r"\bmay bring\b", "brings"),
+            (r"\bcould give\b", "gives"),
+            (r"\bmay give\b", "gives"),
+            (r"\bcould have significant implications for\b", "has significant implications for"),
+            (r"\bmay have significant implications for\b", "has significant implications for"),
+            (r"\bcould influence\b", "shapes"),
+            (r"\bmay influence\b", "shapes"),
+            (r"\bcould shape\b", "shapes"),
+            (r"\bmight shape\b", "shapes"),
+            (r"\bcould be a significant factor in\b", "is a significant factor in"),
+            (r"\bcould be a factor in\b", "is a factor in"),
+            (r"\bwould likely be seen as\b", "is seen as"),
+            (r"\blikely be seen as\b", "is seen as"),
+        ]
+        normalized = text
+        for pattern, replacement in replacements:
+            normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+        return normalized
+
+    def _split_long_sentences(self, text: str) -> str:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        revised_sentences: list[str] = []
+        for sentence in sentences:
+            current = sentence.strip()
+            if not current:
+                continue
+            if len(re.findall(r"\b\w+\b", current)) <= 22:
+                revised_sentences.append(current)
+                continue
+
+            split_parts = self._split_sentence_once(current)
+            if split_parts is None:
+                revised_sentences.append(current)
+                continue
+            revised_sentences.extend(split_parts)
+
+        return " ".join(revised_sentences)
+
+    def _split_sentence_once(self, sentence: str) -> list[str] | None:
+        stripped = sentence.strip()
+        ending = "."
+        if stripped and stripped[-1] in ".!?":
+            ending = stripped[-1]
+            stripped = stripped[:-1]
+
+        for separator, prefix in [
+            (", but ", "But "),
+            (", and ", ""),
+            ("; ", ""),
+            (": ", ""),
+            (", while ", "While "),
+            (", which ", "This "),
+            (", according to ", "According to "),
+            (", ", ""),
+        ]:
+            index = stripped.lower().find(separator)
+            if index <= 0:
+                continue
+            left = stripped[:index].strip()
+            right = stripped[index + len(separator):].strip()
+            if len(re.findall(r"\b\w+\b", left)) < 6 or len(re.findall(r"\b\w+\b", right)) < 6:
+                continue
+            right_text = prefix + right[0].upper() + right[1:] if right else ""
+            return [left + ".", right_text + ending]
+        return None
+
+    def _normalize_existing_sources_section(self, article_html: str) -> str:
+        sources_heading_pattern = re.compile(
+            r"<!--\s*wp:heading(?:\s+\{[^>]*\})?\s*-->\s*<h2[^>]*>\s*Sources\s*</h2>\s*<!--\s*/wp:heading\s*-->",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        heading_match = sources_heading_pattern.search(article_html)
+        if heading_match is None:
+            return article_html
+
+        section_prefix = article_html[:heading_match.end()]
+        section_suffix = article_html[heading_match.end():]
+        if re.match(r"\s*<!--\s*wp:list", section_suffix, flags=re.IGNORECASE):
+            return article_html
+
+        next_heading_match = sources_heading_pattern.search(section_suffix)
+        article_close_match = re.search(r"</article>\s*$", section_suffix, flags=re.IGNORECASE)
+        if next_heading_match:
+            section_body = section_suffix[: next_heading_match.start()]
+            section_remainder = section_suffix[next_heading_match.start():]
+        elif article_close_match:
+            section_body = section_suffix[: article_close_match.start()]
+            section_remainder = section_suffix[article_close_match.start():]
+        else:
+            section_body = section_suffix
+            section_remainder = ""
+
+        paragraph_pattern = re.compile(
+            r"<!--\s*wp:paragraph\s*-->\s*<p>(.*?)</p>\s*<!--\s*/wp:paragraph\s*-->",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        items: list[str] = []
+        cursor = 0
+        for paragraph_match in paragraph_pattern.finditer(section_body):
+            if section_body[cursor:paragraph_match.start()].strip():
+                return article_html
+            item = self._parse_markdown_source_item(paragraph_match.group(1))
+            if item is None:
+                return article_html
+            items.append(item)
+            cursor = paragraph_match.end()
+
+        if not items or section_body[cursor:].strip():
+            return article_html
+
+        list_block = (
+            "\n<!-- wp:list -->\n<ul>\n"
+            + "\n".join(items)
+            + "\n</ul>\n<!-- /wp:list -->\n"
+        )
+        return section_prefix + list_block + section_remainder
+
+    def _parse_markdown_source_item(self, paragraph_html: str) -> str | None:
+        match = re.match(
+            r"\s*[*-]\s+\[(.+?)\]\((https?://[^\s)]+)\)\s*",
+            paragraph_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            return None
+
+        title = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+        url = match.group(2).strip()
+        if not title or not url:
+            return None
+        return f'<li><a href="{escape(url, quote=True)}">{escape(title)}</a></li>'
+
+    def _rewrite_bare_url_anchors(self, article_html: str, research: ResearchPacket) -> str:
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        normalized_body = self._rewrite_bare_url_anchors_in_fragment(article_body, research, in_sources=False)
+        normalized_sources = self._rewrite_bare_url_anchors_in_fragment(sources_tail, research, in_sources=True)
+        return normalized_body + normalized_sources
+
+    def _remove_inline_sources_blocks(self, article_html: str) -> str:
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        inline_sources_pattern = re.compile(
+            r'(?:(?:<!--\s*wp:separator\s*-->\s*)?<hr[^>]*>(?:\s*<!--\s*/wp:separator\s*-->)?\s*)?'
+            r'<!--\s*wp:paragraph\s*-->\s*<p>\s*Sources:?\s*</p>\s*<!--\s*/wp:paragraph\s*-->\s*'
+            r'<!--\s*wp:list\s*-->\s*<ul>.*?</ul>\s*<!--\s*/wp:list\s*-->',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        normalized_body = inline_sources_pattern.sub("", article_body)
+        normalized_body = re.sub(r"\n{3,}", "\n\n", normalized_body)
+        return normalized_body + sources_tail
+
+    def _strip_inline_source_citation_paragraphs(self, article_html: str, research: ResearchPacket) -> str:
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        paragraph_pattern = re.compile(
+            r"<!--\s*wp:paragraph\s*-->\s*<p>(.*?)</p>\s*<!--\s*/wp:paragraph\s*-->",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def repl(match: re.Match[str]) -> str:
+            paragraph_html = match.group(1).strip()
+            if self._is_source_citation_paragraph(paragraph_html, research):
+                return ""
+            return match.group(0)
+
+        normalized_body = paragraph_pattern.sub(repl, article_body)
+        return re.sub(r"\n{3,}", "\n\n", normalized_body) + sources_tail
+
+    def _is_source_citation_paragraph(self, paragraph_html: str, research: ResearchPacket) -> bool:
+        citation_match = re.fullmatch(
+            r'(?:\[\d+\]\s*)?<a\s+href="([^"]+)"[^>]*>.*?</a>\s*[.:;,!?-]*',
+            paragraph_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if citation_match is None:
+            return False
+        return self._source_for_url(research, citation_match.group(1).strip()) is not None
+
+    def _rewrite_bare_url_anchors_in_fragment(
+        self,
+        fragment: str,
+        research: ResearchPacket,
+        *,
+        in_sources: bool,
+    ) -> str:
+        anchor_pattern = re.compile(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', flags=re.IGNORECASE | re.DOTALL)
+
+        def repl(match: re.Match[str]) -> str:
+            href = match.group(1).strip()
+            anchor_text = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+            if not self._is_bare_url_text(anchor_text, href):
+                return match.group(0)
+
+            source = self._source_for_url(research, href)
+            label = self._source_anchor_label(source, href, in_sources=in_sources, surrounding_html=match.string[:match.start()])
+            return f'<a href="{escape(href, quote=True)}">{escape(label)}</a>'
+
+        return anchor_pattern.sub(repl, fragment)
+
+    def _is_bare_url_text(self, anchor_text: str, href: str) -> bool:
+        normalized_text = self._normalize_url_like_text(anchor_text, strip_citation_prefix=True)
+        normalized_href = self._normalize_url_like_text(href)
+        return normalized_text == normalized_href
+
+    def _normalize_url_like_text(self, value: str, *, strip_citation_prefix: bool = False) -> str:
+        normalized = re.sub(r"\s+", " ", value or "").strip()
+        if strip_citation_prefix:
+            normalized = re.sub(r"^\[\d+\]\s*", "", normalized)
+        normalized = normalized.rstrip(")").rstrip(".").rstrip("/")
+        return normalized
+
+    def _source_for_url(self, research: ResearchPacket, href: str):
+        normalized_href = href.strip().rstrip("/")
+        for source in research.sources:
+            if (source.url or "").strip().rstrip("/") == normalized_href:
+                return source
+        return None
+
+    def _source_anchor_label(self, source, href: str, *, in_sources: bool, surrounding_html: str) -> str:
+        if source is not None:
+            title = (source.title or "").strip()
+            publisher = (source.publisher or "").strip()
+            if in_sources:
+                return title or publisher or self._friendly_link_label(href)
+            if publisher and publisher.lower() in surrounding_html.lower():
+                return "the report"
+            return publisher or title or self._friendly_link_label(href)
+        return self._friendly_link_label(href)
+
+    def _focus_keyword_tokens(self, focus_keyword: str | None) -> list[str]:
+        if not focus_keyword:
+            return []
+        return [token for token in tokenize(focus_keyword) if len(token) > 2 and token not in self.GENERIC_KEYWORD_TOKENS]
+
+    def _anchor_competes_with_focus(self, anchor_text: str, focus_keyword: str | None) -> bool:
+        if not focus_keyword:
+            return False
+
+        normalized = re.sub(r"<[^>]+>", " ", anchor_text or "")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return False
+        if focus_keyword.casefold() in normalized.casefold():
+            return True
+
+        focus_tokens = self._focus_keyword_tokens(focus_keyword)
+        if not focus_tokens:
+            return False
+        anchor_tokens = set(tokenize(normalized))
+        return sum(1 for token in focus_tokens if token in anchor_tokens) >= min(2, len(focus_tokens))
+
+    def _density_replacement_phrase(self, focus_keyword: str | None) -> str:
+        if not focus_keyword:
+            return "the campaign"
+
+        if self._focus_keyword_content_word_count(focus_keyword) >= 4:
+            return "the policy move"
+
+        parts = self._display_focus_keyword(focus_keyword).split()
+        if len(parts) >= 3:
+            return " ".join(parts[:2])
+        if len(parts) == 2:
+            if all(part[:1].isupper() and part[1:].islower() for part in parts):
+                return parts[-1]
+            return parts[0]
+        if parts:
+            return f"the {parts[0]} story"
+        return "the campaign"
+
+    def _visible_focus_keyword_occurrences(self, article_html: str, focus_keyword: str | None) -> int:
+        if not focus_keyword:
+            return 0
+        visible_text = re.sub(r"<[^>]+>", " ", article_html)
+        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+        return len(re.findall(re.escape(focus_keyword), visible_text, flags=re.IGNORECASE))
+
+    def _max_focus_keyword_occurrences(self, article_html: str, focus_keyword: str | None) -> int:
+        if not focus_keyword:
+            return 0
+        word_count = self._word_count(article_html)
+        dynamic_cap = round(max(word_count, 1) / 50)
+        return min(7, max(4, dynamic_cap))
+
+    def _replace_focus_keyword_in_html_text(
+        self,
+        fragment: str,
+        focus_keyword: str,
+        replacement: str,
+        max_replacements: int,
+    ) -> tuple[str, int]:
+        if max_replacements <= 0:
+            return fragment, 0
+
+        pattern = re.compile(re.escape(focus_keyword), flags=re.IGNORECASE)
+        segments = re.split(r"(<[^>]+>)", fragment)
+        replaced = 0
+
+        for index in range(len(segments) - 1, -1, -1):
+            segment = segments[index]
+            if not segment or segment.startswith("<"):
+                continue
+            matches = list(pattern.finditer(segment))
+            if not matches:
+                continue
+            updated_segment = segment
+            for match in reversed(matches):
+                if replaced >= max_replacements:
+                    break
+                updated_segment = updated_segment[:match.start()] + replacement + updated_segment[match.end():]
+                replaced += 1
+            segments[index] = updated_segment
+            if replaced >= max_replacements:
+                break
+
+        return "".join(segments), replaced
+
+    def _reduce_focus_keyword_density(self, article_html: str, focus_keyword: str | None) -> str:
+        if not focus_keyword:
+            return article_html
+
+        current_occurrences = self._visible_focus_keyword_occurrences(article_html, focus_keyword)
+        max_occurrences = self._max_focus_keyword_occurrences(article_html, focus_keyword)
+        if current_occurrences <= max_occurrences:
+            return article_html
+
+        replacement = self._density_replacement_phrase(focus_keyword)
+        if replacement.casefold() == focus_keyword.casefold():
+            return article_html
+
+        updated = article_html
+        extra_matches = current_occurrences - max_occurrences
+        paragraph_pattern = re.compile(r"(<p[^>]*>)(.*?)(</p>)", flags=re.IGNORECASE | re.DOTALL)
+        paragraphs = list(paragraph_pattern.finditer(article_html))
+        preferred_paragraphs = paragraphs[1:] if len(paragraphs) > 1 else paragraphs
+
+        for match in reversed(preferred_paragraphs):
+            inner_html = match.group(2)
+            updated_inner_html, replaced = self._replace_focus_keyword_in_html_text(
+                inner_html,
+                focus_keyword,
+                replacement,
+                extra_matches,
+            )
+            if replaced <= 0:
+                continue
+            updated = updated[:match.start(2)] + updated_inner_html + updated[match.end(2):]
+            extra_matches -= replaced
+            if extra_matches <= 0:
+                break
+
+        if extra_matches > 0:
+            updated, _ = self._replace_focus_keyword_in_html_text(updated, focus_keyword, replacement, extra_matches)
+        return updated
+
+    def _avoid_competing_link_anchors(
+        self,
+        article_html: str,
+        research: ResearchPacket,
+        focus_keyword: str | None,
+    ) -> str:
+        if not focus_keyword:
+            return article_html
+
+        anchor_pattern = re.compile(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', flags=re.IGNORECASE | re.DOTALL)
+
+        def sanitize(fragment: str, *, in_sources: bool) -> str:
+            def repl(match: re.Match[str]) -> str:
+                href = match.group(1).strip()
+                anchor_text = re.sub(r"<[^>]+>", " ", match.group(2))
+                anchor_text = re.sub(r"\s+", " ", anchor_text).strip()
+                if not self._anchor_competes_with_focus(anchor_text, focus_keyword):
+                    return match.group(0)
+
+                source = self._source_for_url(research, href)
+                if in_sources:
+                    label = (source.publisher or "").strip() if source is not None else ""
+                    label = label or self._friendly_link_label(href)
+                    return f'<a href="{escape(href, quote=True)}">{escape(label)}</a>'
+
+                return escape(anchor_text)
+
+            return anchor_pattern.sub(repl, fragment)
+
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        return sanitize(article_body, in_sources=False) + sanitize(sources_tail, in_sources=True)
+
+    def _friendly_link_label(self, href: str) -> str:
+        hostname = urlsplit(href).netloc.lower()
+        hostname = re.sub(r"^www\.", "", hostname)
+        if not hostname:
+            return href
+        return hostname
+
+    def _flatten_nested_headings(self, article_html: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            heading_body = re.sub(r"\s+", " ", match.group(2)).strip()
+            if not heading_body:
+                return ""
+            return f"<p><strong>{heading_body}</strong></p>"
+
+        return re.sub(r"<h([3-6])\b[^>]*>(.*?)</h\1>", repl, article_html, flags=re.IGNORECASE | re.DOTALL)
+
+    def _is_politics_topic(self, topic: TrendTopic | None) -> bool:
+        if topic is None:
+            return False
+
+        configured_category = normalize_topic_category(self.config.topic_category)
+        if configured_category == "politics":
+            return True
+
+        return bool(set(tokenize(topic.keyword)) & self.POLITICS_TOKENS)
+
+    def _enforce_news_section_limit(self, article_html: str) -> str:
+        heading_pattern = re.compile(
+            r"<!--\s*wp:heading(?:\s+\{[^>]*\})?\s*-->\s*<h2[^>]*>\s*(.*?)\s*</h2>\s*<!--\s*/wp:heading\s*-->",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        matches = list(heading_pattern.finditer(article_html))
+        if len(matches) <= 3:
+            return article_html
+
+        sources_index = next(
+            (
+                index
+                for index, match in enumerate(matches)
+                if re.sub(r"<[^>]+>", "", match.group(1)).strip().casefold() == "sources"
+            ),
+            None,
+        )
+        if sources_index is None or sources_index <= 2:
+            return article_html
+
+        normalized = article_html
+        for match in reversed(matches[2:sources_index]):
+            normalized = normalized[:match.start()] + normalized[match.end():]
+
+        return re.sub(r"\n{3,}", "\n\n", normalized)
+
+    def _inject_inline_context_links(self, article_html: str, research: ResearchPacket) -> str:
+        linked_entities: set[str] = set()
+        article_body, sources_tail = self._split_before_sources_section(article_html)
+        normalized = article_body
+
+        for reference in research.context_references:
+            entity = (reference.entity or "").strip()
+            url = (reference.url or "").strip()
+            if not entity or not url:
+                continue
+
+            entity_key = entity.casefold()
+            if entity_key in linked_entities:
+                continue
+
+            paragraph_pattern = re.compile(r"(<p[^>]*>)(.*?)(</p>)", flags=re.IGNORECASE | re.DOTALL)
+            replaced = False
+
+            def replace_in_paragraph(match: re.Match[str]) -> str:
+                nonlocal replaced
+                if replaced:
+                    return match.group(0)
+
+                opening_tag, paragraph_body, closing_tag = match.groups()
+                linked_paragraph = self._link_entity_in_paragraph_body(paragraph_body, entity, url)
+                if linked_paragraph == paragraph_body:
+                    return match.group(0)
+                replaced = True
+                return opening_tag + linked_paragraph + closing_tag
+
+            updated = paragraph_pattern.sub(replace_in_paragraph, normalized)
+            if replaced:
+                normalized = updated
+                linked_entities.add(entity_key)
+
+        return normalized + sources_tail
+
+    def _link_entity_in_paragraph_body(self, paragraph_body: str, entity: str, url: str) -> str:
+        if not paragraph_body or url in paragraph_body:
+            return paragraph_body
+
+        entity_pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(entity)}(?![A-Za-z0-9])", flags=re.IGNORECASE)
+        segments = re.split(r"(<a\b[^>]*>.*?</a>)", paragraph_body, flags=re.IGNORECASE | re.DOTALL)
+
+        for index, segment in enumerate(segments):
+            if not segment or re.match(r"<a\b", segment, flags=re.IGNORECASE):
+                continue
+
+            entity_match = entity_pattern.search(segment)
+            if entity_match is None:
+                continue
+
+            anchor = (
+                f'<a href="{escape(url, quote=True)}">'
+                f'{segment[entity_match.start():entity_match.end()]}'
+                "</a>"
+            )
+            segments[index] = (
+                segment[:entity_match.start()]
+                + anchor
+                + segment[entity_match.end():]
+            )
+            return "".join(segments)
+
+        return paragraph_body
+
+    def _split_before_sources_section(self, article_html: str) -> tuple[str, str]:
+        sources_heading_match = re.search(
+            r"<!--\s*wp:heading(?:\s+\{[^>]*\})?\s*-->\s*<h2[^>]*>\s*Sources\s*</h2>\s*<!--\s*/wp:heading\s*-->",
+            article_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if sources_heading_match is None:
+            return article_html, ""
+        return article_html[:sources_heading_match.start()], article_html[sources_heading_match.start():]
+
+    def _is_internal_link(self, href: str) -> bool:
+        normalized = href.strip()
+        if normalized.startswith("/") and not normalized.startswith("//"):
+            return True
+        base_url = self._site_base_url()
+        if not base_url:
+            return False
+        return normalized.startswith(base_url.rstrip("/") + "/") or normalized == base_url.rstrip("/")
+
+    def _ensure_also_read_block(self, article_html: str, topic: TrendTopic | None) -> str:
+        if topic is None:
+            return article_html
+
+        internal_article = self._select_internal_article(topic)
+        if internal_article is None:
+            return article_html
+        if internal_article["url"] in article_html or re.search(r">\s*Also Read\s*<", article_html, flags=re.IGNORECASE):
+            return article_html
+
+        paragraph_matches = list(
+            re.finditer(r"<!--\s*wp:paragraph\s*-->.*?<!--\s*/wp:paragraph\s*-->", article_html, flags=re.IGNORECASE | re.DOTALL)
+        )
+        if not paragraph_matches:
+            return article_html
+
+        insert_after = paragraph_matches[1].end() if len(paragraph_matches) >= 2 else paragraph_matches[0].end()
+        also_read_block = self._build_also_read_html(internal_article)
+        return article_html[:insert_after] + also_read_block + article_html[insert_after:]
+
+    def _build_also_read_markdown(self, internal_article: dict[str, str]) -> str:
+        return (
+            f"**Also Read:** [{internal_article['title']}]({internal_article['url']})"
+        )
+
+    def _build_sources_markdown(self, research: ResearchPacket) -> str:
+        lines = []
+        seen_urls: set[str] = set()
+        for source in research.sources[:5]:
+            url = (source.url or "").strip()
+            title = self._trim_text(source.title or url, 120)
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            lines.append(f"- [{title}]({url})")
+        if not lines:
+            return ""
+        return "## Sources\n" + "\n".join(lines)
+
+    def _ensure_sources_markdown(self, article_markdown: str, topic: TrendTopic | None = None) -> str:
+        normalized = article_markdown.strip()
+        if re.search(r"(^|\n)##\s+Sources\b", normalized, flags=re.IGNORECASE):
+            return normalized
+        if topic is None:
+            return normalized
+        return normalized
+
+    def _ensure_sources_section(self, article_html: str, research: ResearchPacket) -> str:
+        if re.search(r"<h2[^>]*>\s*Sources\s*</h2>", article_html, flags=re.IGNORECASE):
+            return article_html
+
+        source_items = []
+        seen_urls: set[str] = set()
+        for source in research.sources[:5]:
+            url = (source.url or "").strip()
+            title = self._trim_text(source.title or url, 120)
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            source_items.append(
+                f'<li><a href="{escape(url, quote=True)}">{escape(title)}</a></li>'
+            )
+
+        if not source_items:
+            return article_html
+
+        sources_block = (
+            "\n<!-- wp:heading -->\n<h2>Sources</h2>\n<!-- /wp:heading -->\n"
+            "<!-- wp:list -->\n<ul>\n"
+            + "\n".join(source_items)
+            + "\n</ul>\n<!-- /wp:list -->\n"
+        )
+
+        article_close = re.search(r"</article>\s*$", article_html, flags=re.IGNORECASE)
+        if article_close is None:
+            return article_html + sources_block
+        return article_html[:article_close.start()] + sources_block + article_html[article_close.start():]
+
+    def _build_also_read_html(self, internal_article: dict[str, str]) -> str:
+        return (
+            "\n<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n"
+            "<!-- wp:paragraph -->\n"
+            f"<p><strong>Also Read:</strong> <a href=\"{escape(internal_article['url'], quote=True)}\">{escape(internal_article['title'])}</a></p>\n"
+            "<!-- /wp:paragraph -->\n"
+            "<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n"
+        )
+
+    def _select_internal_article(self, topic: TrendTopic) -> dict[str, str] | None:
+        base_url = self._site_base_url()
+        cache_dir = Path(self.config.storage_root) / "cache"
+        if not base_url or not cache_dir.exists():
+            return None
+
+        current_slug = slugify(topic.keyword)
+        candidates: list[tuple[int, float, str, str]] = []
+        topic_tokens = set(tokenize(topic.keyword))
+
+        for path in cache_dir.glob("publish-*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            wordpress = payload.get("wordpress") or {}
+            wordpress_sync = payload.get("wordpress_sync") or {}
+            slug = str(wordpress.get("slug") or "").strip()
+            title = str(wordpress.get("title") or "").strip()
+            remote_status = str(wordpress_sync.get("remote_status") or wordpress.get("post_status") or "").strip().lower()
+            if not slug or not title or slug == current_slug or remote_status != "publish":
+                continue
+
+            selected_topic = payload.get("run", {}).get("selected_topic", {})
+            comparison_text = f"{title} {selected_topic.get('keyword', '')}"
+            score = len(topic_tokens & set(tokenize(comparison_text)))
+            if score <= 0:
+                continue
+
+            candidates.append((score, path.stat().st_mtime, title, f"{base_url.rstrip('/')}/{slug.strip('/')}/"))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        _score, _mtime, title, url = candidates[0]
+        return {"title": title, "url": url}
+
+    def _site_base_url(self) -> str | None:
+        url = (self.config.wordpress_graphql_url or "").strip()
+        if not url:
+            return None
+        return re.sub(r"/graphql/?$", "", url)
+
+    def _wrap_article_html(self, article_html: str) -> str:
+        normalized = article_html.strip()
+        if not re.search(r"<article\b", normalized, flags=re.IGNORECASE):
+            normalized = f'<article class="trend-agent-post">\n{normalized}\n</article>'
+        return normalized
+
+    def _strip_gutenberg_comments(self, article_html: str) -> str:
+        stripped = re.sub(r"<!--\s*/?wp:[^>]+-->", "", article_html, flags=re.IGNORECASE)
+        stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+        return stripped.strip()
+
+    def _to_gutenberg_blocks(self, article_html: str) -> str:
+        blockified = article_html.strip()
+        blockified = self._wrap_heading_blocks(blockified)
+        blockified = self._wrap_tag_block(blockified, "p", "paragraph")
+        blockified = self._wrap_list_blocks(blockified)
+        blockified = self._wrap_tag_block(blockified, "blockquote", "quote")
+        blockified = self._wrap_separator_blocks(blockified)
+        return blockified
+
+    def _wrap_heading_blocks(self, article_html: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            level = int(match.group(1))
+            heading_html = match.group(0)
+            if "<!-- wp:heading" in heading_html:
+                return heading_html
+            block_meta = "" if level == 2 else f' {{"level":{level}}}'
+            return f'<!-- wp:heading{block_meta} -->\n{heading_html}\n<!-- /wp:heading -->'
+
+        return re.sub(r"<h([1-6])[^>]*>.*?</h\1>", repl, article_html, flags=re.IGNORECASE | re.DOTALL)
+
+    def _wrap_tag_block(self, article_html: str, tag: str, block_name: str) -> str:
+        pattern = rf"<{tag}\b[^>]*>.*?</{tag}>"
+
+        def repl(match: re.Match[str]) -> str:
+            block_html = match.group(0)
+            if f"<!-- wp:{block_name}" in block_html:
+                return block_html
+            return f"<!-- wp:{block_name} -->\n{block_html}\n<!-- /wp:{block_name} -->"
+
+        return re.sub(pattern, repl, article_html, flags=re.IGNORECASE | re.DOTALL)
+
+    def _wrap_list_blocks(self, article_html: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            list_html = match.group(0)
+            if "<!-- wp:list" in list_html:
+                return list_html
+            ordered = match.group(1).lower() == "ol"
+            metadata = ' {"ordered":true}' if ordered else ""
+            return f"<!-- wp:list{metadata} -->\n{list_html}\n<!-- /wp:list -->"
+
+        return re.sub(r"<(ul|ol)\b[^>]*>.*?</\1>", repl, article_html, flags=re.IGNORECASE | re.DOTALL)
+
+    def _wrap_separator_blocks(self, article_html: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            separator_html = match.group(0)
+            if "<!-- wp:separator" in separator_html:
+                return separator_html
+            return f"<!-- wp:separator -->\n{separator_html}\n<!-- /wp:separator -->"
+
+        return re.sub(r"<hr\s*/?>", repl, article_html, flags=re.IGNORECASE)
+
+    def _mock_article(self, topic: TrendTopic, research: ResearchPacket, plan: ContentPlan) -> GeneratedArticle:
+        lead = research.lead or (research.present[0] if research.present else topic.keyword)
+        why_now = research.present[1] if len(research.present) > 1 else lead
+        background = research.past[0] if research.past else (research.facts[1] if len(research.facts) > 1 else lead)
+        next_step = research.future[0] if research.future else f"Readers should watch for the next confirmed development tied to {topic.keyword}."
+        lead_fact = self._trim_text(lead, 130).rstrip(". ")
+        why_fact = self._trim_text(why_now, 130).rstrip(". ")
+        background_fact = self._trim_text(background, 130).rstrip(". ")
+        next_fact = self._trim_text(next_step, 130).rstrip(". ")
+        lead_publisher = research.sources[0].publisher or "the lead outlet" if research.sources else "the lead outlet"
+        second_publisher = research.sources[1].publisher or research.sources[0].publisher if len(research.sources) > 1 else lead_publisher
+
+        if plan.article_type == "politics_news":
+            article_markdown = "\n".join(
+                [
+                    f"# {topic.keyword}: What happened and what it means now",
+                    "",
+                    "## A major political shift",
+                    f"According to {lead_publisher}, {lead_fact}.",
+                    "",
+                    f"The immediate significance is that this result resets the political picture around {topic.keyword} for readers following the race or governing fight.",
+                    "",
+                    f"The closest background is that {background_fact}. That gives readers the context behind the result without turning the piece into an explainer.",
+                    "",
+                    f"## {plan.sections[1]}",
+                    f"According to {second_publisher}, {why_fact}.",
+                    "",
+                    f"The next checkpoint is straightforward: {next_fact}.",
+                    "",
+                    "This section should stay focused on the party stakes, the race outlook, and the next confirmed development that matters to readers.",
+                    "",
+                    self._build_sources_markdown(research),
+                ]
+            ).strip()
+
+            article_html = self._render_wordpress_html(article_markdown)
+            article_html = self._normalize_article_html(article_html, research, topic)
+            article_markdown = self._normalize_article_markdown(article_markdown, topic)
+
+            return GeneratedArticle(
+                catchy_title=f"{topic.keyword}: the political shift and what it means now",
+                seo_keywords=[plan.primary_keyword, *plan.secondary_keywords[:5]],
+                meta_description=f"Latest political developments on {topic.keyword}, why the result matters, and what comes next.",
+                blog_outline=plan.sections,
+                article_markdown=article_markdown,
+                article_html=article_html,
+                image_prompts=[
+                    f"Editorial political cover image for {topic.keyword}",
+                    f"News illustration showing the political stakes behind {topic.keyword}",
+                    f"Professional newsroom thumbnail for {topic.keyword}",
+                ],
+            )
+
+        article_markdown = "\n".join(
+            [
+                f"# {topic.keyword}: What happened and why it matters now",
+                "",
+                "## The latest development",
+                f"According to {lead_publisher}, {lead_fact}.",
+                "",
+                f"The latest reporting keeps the focus on the event itself rather than on search interest around {topic.keyword}.",
+                "",
+                f"That gives readers a direct lead with the newest verified turn and a clear statement of what changed in the story today.",
+                "",
+                "A newsroom-style draft should start with the decisive fact and then move directly into the evidence supporting that turn.",
+                "",
+                f"## {plan.sections[1]}",
+                f"According to {second_publisher}, {why_fact}.",
+                "",
+                f"This matters because the development affects the next phase of the story and clarifies why editors are elevating it now.",
+                "",
+                f"The key background is that {background_fact}. That is the context readers need before moving to the next step.",
+                "",
+                f"Readers should leave with a clear sense of the next checkpoint and why that follow-up matters for {topic.keyword}. {next_fact}.",
+                "",
+                "That keeps the piece grounded in reporting while still giving readers the immediate consequence, the needed context, and the most relevant next turn in the story.",
+                "",
+                "A strong straight-news draft should leave the reader with the central fact, the practical significance, and the next verified thing to watch without drifting into a separate explainer section.",
+                "",
+                "That is the core newsroom standard here.",
+                "",
+                self._build_sources_markdown(research),
+            ]
+        ).strip()
+
+        article_html = self._render_wordpress_html(article_markdown)
+        article_html = self._normalize_article_html(article_html, research, topic)
+        article_markdown = self._normalize_article_markdown(article_markdown, topic)
+
+        return GeneratedArticle(
+            catchy_title=f"{topic.keyword}: what happened and why it matters now",
+            seo_keywords=[plan.primary_keyword, *plan.secondary_keywords[:5]],
+            meta_description=f"Latest developments on {topic.keyword} and why the story matters now.",
+            blog_outline=plan.sections,
+            article_markdown=article_markdown,
+            article_html=article_html,
+            image_prompts=[
+                f"Hero illustration for a newsroom article about {topic.keyword}",
+                f"Editorial scene showing the latest development tied to {topic.keyword}",
+                f"News-style article thumbnail for {topic.keyword} with a professional editorial look",
+            ],
+        )
+
+
+class WritingAgent(BaseAgent):
+    stage_name = "generator"
+
+    def __init__(self, service: BlogGenerationService, logger: PipelineLogger) -> None:
+        self.service = service
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if (
+            context.run is None
+            or context.run.selected_topic is None
+            or context.run.research is None
+            or context.run.plan is None
+        ):
+            raise RuntimeError("Topic, research, and plan are required before writing")
+
+        context.run.blog = self.service.generate(context.run.selected_topic, context.run.research, context.run.plan)
+        self.logger.info(context.run, "Generated article draft")
+        self.logger.transition(context.run, "blog_generated")
+---------------
+Image generator agent
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = None
+    genai_types = None
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import ImageAsset, TrendTopic
+from ..base import AgentContext, BaseAgent
+from ..helpers import slugify
+
+
+class ImageEnrichmentService:
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        self.root = Path(config.storage_root)
+        self.image_dir = self.root / "images"
+        self.image_dir.mkdir(parents=True, exist_ok=True)
+
+    def build(self, topic: TrendTopic, prompts: list[str]) -> list[ImageAsset]:
+        assets: list[ImageAsset] = []
+        for index, prompt in enumerate(prompts, start=1):
+            asset = ImageAsset(
+                prompt=prompt,
+                alt_text=f"{topic.keyword} editorial illustration {index}",
+                status="planned",
+            )
+            generated_asset = self._generate_image(topic, asset, index)
+            assets.append(generated_asset)
+        return assets
+
+    def _generate_image(self, topic: TrendTopic, asset: ImageAsset, index: int) -> ImageAsset:
+        if self.config.mock_mode or genai is None or genai_types is None or not self.config.gemini_api_key:
+            return asset
+
+        try:
+            client = genai.Client(api_key=self.config.gemini_api_key)
+            response = client.models.generate_content(
+                model=self.config.gemini_image_model,
+                contents=asset.prompt,
+                config=genai_types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
+            )
+            image_bytes, mime_type = self._extract_inline_image(response)
+            if image_bytes is None or mime_type is None:
+                return ImageAsset(
+                    prompt=asset.prompt,
+                    alt_text=asset.alt_text,
+                    status="failed",
+                    provider="gemini",
+                    error="Gemini returned no image data",
+                )
+
+            extension = "png" if "png" in mime_type else "jpg"
+            image_path = self.image_dir / f"{slugify(topic.keyword)}-{index}.{extension}"
+            image_path.write_bytes(image_bytes)
+            return ImageAsset(
+                prompt=asset.prompt,
+                alt_text=asset.alt_text,
+                status="generated",
+                provider="gemini",
+                image_path=str(image_path),
+                mime_type=mime_type,
+            )
+        except Exception as exc:
+            return ImageAsset(
+                prompt=asset.prompt,
+                alt_text=asset.alt_text,
+                status="failed",
+                provider="gemini",
+                error=str(exc),
+            )
+
+    def _extract_inline_image(self, response) -> tuple[bytes | None, str | None]:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                inline_data = getattr(part, "inline_data", None)
+                if inline_data is None:
+                    continue
+                data = getattr(inline_data, "data", None)
+                mime_type = getattr(inline_data, "mime_type", None)
+                if data is None or mime_type is None:
+                    continue
+                if isinstance(data, str):
+                    return base64.b64decode(data), mime_type
+                return data, mime_type
+        return None, None
+
+
+class ImageAgent(BaseAgent):
+    stage_name = "image"
+
+    def __init__(self, service: ImageEnrichmentService, logger: PipelineLogger) -> None:
+        self.service = service
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None or context.run.selected_topic is None or context.run.blog is None:
+            raise RuntimeError("Selected topic and blog are required before image planning")
+
+        context.run.images = self.service.build(context.run.selected_topic, context.run.blog.image_prompts)
+        self.logger.info(context.run, f"Prepared {len(context.run.images)} image assets")
+        self.logger.transition(context.run, "images_generated")
+--------------
+Memory agent
+from __future__ import annotations
+
+from pathlib import Path
+import json
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import EditorialMemoryEntry, EditorialMemoryPacket, PipelineRun, TrendTopic
+from ..base import AgentContext, BaseAgent
+from ..helpers import serialize, slugify, tokenize
+
+
+class EditorialMemoryService:
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        self.root = Path(config.storage_root)
+        self.memory_dir = self.root / "memory"
+        self.memory_path = self.memory_dir / "editorial_memory.jsonl"
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+    def retrieve(self, topic: TrendTopic) -> EditorialMemoryPacket:
+        entries = self._load_entries()
+        if not entries:
+            return EditorialMemoryPacket()
+
+        cluster_matches = [entry for entry in entries if entry.cluster_key == (topic.cluster_key or slugify(topic.keyword))]
+        token_matches = [
+            entry
+            for entry in entries
+            if entry not in cluster_matches and self._topic_overlap(entry.keyword, topic.keyword)
+        ]
+        selected = (cluster_matches + token_matches)[: self.config.editorial_memory_limit]
+        guidance = [
+            f"Reuse successful angle from '{entry.title}' for audience '{entry.audience}'."
+            for entry in selected
+        ]
+        for entry in selected:
+            if entry.sections:
+                guidance.append("Proven sections: " + ", ".join(entry.sections[:5]))
+            if entry.issues:
+                guidance.append("Avoid previous issues: " + ", ".join(entry.issues[:3]))
+
+        return EditorialMemoryPacket(entries=selected, guidance=guidance)
+
+    def remember(self, run: PipelineRun) -> None:
+        if run.selected_topic is None or run.plan is None or run.blog is None or run.validation is None:
+            return
+
+        if any(entry.run_id == run.run_id for entry in self._load_entries()):
+            return
+
+        entry = EditorialMemoryEntry(
+            run_id=run.run_id,
+            keyword=run.selected_topic.keyword,
+            cluster_key=run.selected_topic.cluster_key or slugify(run.selected_topic.keyword),
+            title=run.blog.catchy_title,
+            audience=run.plan.audience,
+            sections=run.plan.sections,
+            issues=run.validation.issues,
+            quality_score=run.validation.quality_score,
+            seo_score=run.validation.seo_score,
+            grounding_score=run.validation.grounding_score,
+            publish=run.validation.publish,
+            captured_at=run.started_at,
+        )
+        with self.memory_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(serialize(entry), ensure_ascii=False) + "\n")
+
+    def _load_entries(self) -> list[EditorialMemoryEntry]:
+        if not self.memory_path.exists():
+            return []
+
+        entries: list[EditorialMemoryEntry] = []
+        for line in self.memory_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entries.append(EditorialMemoryEntry(**payload))
+
+        entries.sort(key=lambda item: item.captured_at, reverse=True)
+        return entries
+
+    def _topic_overlap(self, left: str, right: str) -> bool:
+        left_tokens = set(tokenize(left))
+        right_tokens = set(tokenize(right))
+        return len(left_tokens & right_tokens) >= 2
+
+
+class MemoryAgent(BaseAgent):
+    stage_name = "memory"
+
+    def __init__(self, service: EditorialMemoryService, logger: PipelineLogger) -> None:
+        self.service = service
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None or context.run.selected_topic is None:
+            raise RuntimeError("Selected topic is required before editorial memory retrieval")
+
+        context.run.memory = self.service.retrieve(context.run.selected_topic)
+        self.logger.info(context.run, f"Retrieved {len(context.run.memory.entries)} editorial memory entries")
+        self.logger.transition(context.run, "memory_loaded")
+--------------
+Planner agent
+
+from __future__ import annotations
+
+import re
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import ContentPlan, EditorialMemoryPacket, ResearchPacket, TrendTopic
+from ..base import AgentContext, BaseAgent
+from ..helpers import extract_keywords, normalize_topic_category, tokenize
+
+
+class ContentPlanningService:
+    PRIMARY_KEYWORD_STOP_TOKENS = {
+        "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "at", "by", "with", "from",
+        "after", "before", "into", "over", "under", "through", "across", "amid", "latest", "breaking",
+    }
+    GENERIC_PRIMARY_KEYWORD_TOKENS = {
+        "bank", "news", "video", "clip", "live", "story", "stories", "latest", "update", "updates",
+        "watch", "report", "reports", "analysis", "market", "politics",
+    }
+    ISSUE_PHRASE_RULES = [
+        ({"interest", "rates"}, "interest rates"),
+        ({"management", "risk"}, "management risk"),
+        ({"mail", "voting"}, "mail voting"),
+        ({"budget", "vote"}, "budget vote"),
+        ({"election", "runoff"}, "election runoff"),
+        ({"primary", "runoff"}, "primary runoff"),
+        ({"ceasefire", "deal"}, "ceasefire deal"),
+        ({"supreme", "court"}, "Supreme Court"),
+        ({"executive", "order"}, "executive order"),
+        ({"stock", "market"}, "stock market"),
+        ({"inflation"}, "inflation"),
+        ({"election"}, "election"),
+        ({"runoff"}, "runoff"),
+        ({"policy"}, "policy"),
+        ({"lawsuit"}, "lawsuit"),
+        ({"ruling"}, "ruling"),
+        ({"tariff"}, "tariff"),
+        ({"earnings"}, "earnings"),
+        ({"layoffs"}, "layoffs"),
+    ]
+    ENTITY_SKIP_PHRASES = {
+        "The Wall Street Journal", "Financial Times", "The New York Times", "Politico", "Reuters", "CNN", "BBC",
+        "The Guardian", "Washington Post", "Fox News", "Fox Business", "AP", "Associated Press",
+    }
+    SPORTS_TOKENS = {
+        "match", "game", "series", "playoffs", "playoff", "final", "finals", "nba", "nfl", "mlb", "nhl",
+        "cup", "semifinal", "quarterfinal", "conference", "western", "eastern", "vs", "fixture", "round",
+    }
+    POLITICS_TOKENS = {
+        "election", "elections", "trump", "biden", "senate", "congress", "government",
+        "policy", "policies", "president", "minister", "parliament", "tariff", "vote", "voting",
+        "campaign", "diplomacy", "diplomatic", "republican", "republicans", "democrat", "democrats", "democratic",
+        "geopolitics", "geopolitical", "primary", "runoff", "governor", "attorney", "general", "incumbent",
+    }
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config
+
+    def _is_politics_topic(self, topic: TrendTopic, research: ResearchPacket | None = None) -> bool:
+        configured_category = normalize_topic_category(self.config.topic_category) if self.config is not None else None
+        if configured_category == "politics":
+            return True
+
+        keyword_tokens = set(tokenize(topic.keyword))
+        if keyword_tokens & self.POLITICS_TOKENS:
+            return True
+
+        if research is None:
+            return False
+
+        title_tokens = set()
+        for source in research.sources[:4]:
+            title_tokens.update(tokenize(source.title))
+
+        research_tokens = set()
+        for snippet in [research.lead, *research.present[:2], *research.past[:1], *research.future[:1]]:
+            research_tokens.update(tokenize(snippet))
+
+        return bool((title_tokens | research_tokens) & self.POLITICS_TOKENS)
+
+    def _article_type(self, topic: TrendTopic, research: ResearchPacket) -> str:
+        keyword_tokens = set(tokenize(topic.keyword))
+        research_tokens = set()
+        for source in research.sources[:4]:
+            research_tokens.update(tokenize(source.title))
+        for snippet in [research.lead, *research.present[:2], *research.past[:1], *research.future[:1]]:
+            research_tokens.update(tokenize(snippet))
+
+        if self._is_politics_topic(topic, research):
+            return "politics_news"
+        if keyword_tokens & {"earnings", "stocks", "fed", "nasdaq", "dow"}:
+            return "market_impact"
+        if (keyword_tokens | research_tokens) & self.SPORTS_TOKENS:
+            return "sports_news"
+        if research.future:
+            return "developing_news"
+        return "news_analysis"
+
+    def _politics_implication_heading(self, topic: TrendTopic, research: ResearchPacket) -> str:
+        corpus = " ".join(
+            [
+                topic.keyword,
+                *(source.title for source in research.sources[:4]),
+                *research.present[:2],
+                *research.past[:1],
+                *research.future[:1],
+            ]
+        ).casefold()
+
+        if any(token in corpus for token in {"redistrict", "district map", "congressional map", "gerrymander"}):
+            return "What This Means for the Map Fight"
+        if "republican" in corpus and "democrat" not in corpus and "democratic" not in corpus:
+            return "What This Means for the Republican Party"
+        if "democrat" in corpus or "democratic" in corpus:
+            return "What This Means for Democrats"
+        if "supreme court" in corpus or "court ruling" in corpus or "justice" in corpus:
+            return "Why the Ruling Matters Now"
+        if any(token in corpus for token in {"budget", "bill", "policy", "lawmakers", "congress"}):
+            return "What This Means in Washington"
+        if any(token in corpus for token in {"senate", "house", "governor", "primary", "runoff", "election", "race"}):
+            return "What This Means for the Race Ahead"
+        if "trump" in corpus:
+            return "What This Means for Trump's Political Push"
+        return "Why This Political Fight Matters Now"
+
+    def _news_implication_heading(self, topic: TrendTopic, research: ResearchPacket, article_type: str) -> str:
+        corpus = " ".join(
+            [
+                topic.keyword,
+                *(source.title for source in research.sources[:4]),
+                *research.present[:2],
+                *research.past[:1],
+                *research.future[:1],
+            ]
+        ).casefold()
+
+        if article_type == "market_impact":
+            return "What It Means for Markets"
+        if article_type == "sports_news":
+            if any(token in corpus for token in {"game 7", "game 6", "game 5", "game 4"}):
+                return "What Game 5 Means for the Series" if "game 5" in corpus else "What This Game Means for the Series"
+            if any(token in corpus for token in {"western conference finals", "eastern conference finals", "finals"}):
+                return "What It Means for the Series"
+            if any(token in corpus for token in {"playoffs", "playoff"}):
+                return "What It Means for the Playoff Race"
+            return "What It Means for the Matchup"
+        if any(token in corpus for token in {"court", "ruling", "judge", "supreme"}):
+            return "Why the Ruling Matters"
+        if any(token in corpus for token in {"lawsuit", "charges", "trial", "investigation"}):
+            return "Why the Case Matters"
+        if any(token in corpus for token in {"release", "launch", "debut", "rollout", "update"}):
+            return "Why This Release Matters"
+        return "Why This Matters Now"
+
+    def _topic_needs_keyword_upgrade(self, topic: TrendTopic) -> bool:
+        raw_tokens = tokenize(topic.keyword)
+        if not raw_tokens:
+            return True
+
+        if len(raw_tokens) > 1:
+            return False
+
+        token = raw_tokens[0]
+        if token in self.GENERIC_PRIMARY_KEYWORD_TOKENS:
+            return True
+        return True
+
+    def _focus_entity_phrase(self, title: str) -> str | None:
+        for acronym in re.findall(r"\b[A-Z]{2,6}\b", title or ""):
+            if acronym not in {"US", "UK", "EU", "UN"}:
+                return acronym
+
+        for match in re.finditer(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b", title or ""):
+            candidate = match.group(0).strip()
+            if candidate in self.ENTITY_SKIP_PHRASES:
+                continue
+            if candidate in {"Gov", "Governor", "President", "Prime Minister"}:
+                continue
+            return candidate
+
+        return None
+
+    def _focus_issue_phrase(self, topic: TrendTopic, research: ResearchPacket, article_type: str) -> str | None:
+        corpus_tokens = set(
+            tokenize(
+                " ".join(
+                    [
+                        topic.keyword,
+                        research.lead,
+                        *research.present[:2],
+                        *research.past[:1],
+                        *research.future[:1],
+                        *(source.title for source in research.sources[:3]),
+                    ]
+                )
+            )
+        )
+        for required_tokens, phrase in self.ISSUE_PHRASE_RULES:
+            if required_tokens <= corpus_tokens:
+                return phrase
+        if article_type == "politics_news":
+            return "politics"
+        return None
+
+    def _derive_primary_keyword(self, topic: TrendTopic, research: ResearchPacket, article_type: str) -> str:
+        cleaned_topic = re.sub(r"\s+", " ", topic.keyword or "").strip()
+        if not self._topic_needs_keyword_upgrade(topic):
+            return self._compact_primary_keyword(cleaned_topic)
+
+        entity = None
+        for source in research.sources[:3]:
+            entity = self._focus_entity_phrase(source.title)
+            if entity:
+                break
+
+        issue = self._focus_issue_phrase(topic, research, article_type)
+        if entity and issue:
+            return self._compact_primary_keyword(f"{entity} {issue}".strip())
+        if issue:
+            return self._compact_primary_keyword(issue)
+        if entity:
+            return self._compact_primary_keyword(entity)
+        return self._compact_primary_keyword(cleaned_topic)
+
+    def _compact_primary_keyword(self, value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", value or "").strip()
+        if not cleaned:
+            return ""
+
+        words = cleaned.split()
+        content_words = [
+            word
+            for word in words
+            if re.sub(r"[^a-z0-9-]", "", word.casefold())
+            and re.sub(r"[^a-z0-9-]", "", word.casefold()) not in self.PRIMARY_KEYWORD_STOP_TOKENS
+        ]
+        if len(content_words) <= 4:
+            return cleaned
+
+        compact_words: list[str] = []
+        content_count = 0
+        for word in words:
+            normalized = re.sub(r"[^a-z0-9-]", "", word.casefold())
+            if not normalized:
+                continue
+            if normalized in self.PRIMARY_KEYWORD_STOP_TOKENS and not compact_words:
+                continue
+            compact_words.append(word)
+            if normalized not in self.PRIMARY_KEYWORD_STOP_TOKENS:
+                content_count += 1
+            if content_count >= 4:
+                break
+
+        compact = " ".join(compact_words).strip(" ,;:-")
+        return compact or cleaned
+
+    def build(
+        self,
+        topic: TrendTopic,
+        research: ResearchPacket,
+        memory: EditorialMemoryPacket | None = None,
+    ) -> ContentPlan:
+        audience = "tech and business readers"
+        is_politics_topic = self._is_politics_topic(topic, research)
+        if is_politics_topic or any(token in tokenize(topic.keyword) for token in {"cricket", "match", "ipl", "football"}):
+            audience = "general news readers"
+
+        article_type = self._article_type(topic, research)
+        sections = [
+            "Main development",
+            self._news_implication_heading(topic, research, article_type),
+            "Sources",
+        ]
+        if article_type == "politics_news":
+            sections = [
+                "The political shift",
+                self._politics_implication_heading(topic, research),
+                "Sources",
+            ]
+        keywords = extract_keywords(topic.keyword, research.sources)
+        primary_keyword = self._derive_primary_keyword(topic, research, article_type)
+        if primary_keyword and primary_keyword not in keywords:
+            keywords = [primary_keyword, *keywords][:6]
+        brief = (
+            f"Write for {audience}. Treat this as a {article_type.replace('_', ' ')} for a US news audience. "
+            f"Open with the newest confirmed development about {topic.keyword}, follow with a nut graf on why it matters now, "
+            "then connect the present development to relevant background and the next likely turn in the story. "
+            "Keep the structure tight and news-like: a few strong H2 sections, not a stack of explainer subheads."
+        )
+        brief += (
+            f" The editorial implication angle for this story is '{sections[1]}'. Treat the section list as internal guidance only and rewrite it into story-specific newsroom headings rather than printing the labels verbatim."
+        )
+        if article_type == "politics_news":
+            brief += (
+                " For politics pieces, keep the format flat: after the lede and nut graf, use one H2 for the main political shift or result, "
+                f"then one H2 for what it means for the party, race, or governing stakes. The source-derived implication angle for this story is '{sections[1]}'. "
+                "Write those H2s as story-specific newsroom headings in the style of 'A major political shift in Texas' and 'What this means for the Republican Party'. Do not create extra subtopics, nested explainers, or H3 headings."
+            )
+        else:
+            brief += (
+                " For standard news pieces, use no more than two substantive H2 sections before Sources. Fold forward-looking context into the second section instead of adding a separate 'what comes next' heading."
+            )
+        if article_type == "sports_news":
+            brief += (
+                " For sports stories, make the second H2 strong and specific to the game, series, or playoff stakes. Avoid generic labels like 'Why This Matters Now'. Prefer headings in the style of 'What Game 5 Means for the Series' or 'Why This Result Shifts the West Finals'."
+            )
+        memory_notes = memory.guidance if memory is not None else []
+        if memory_notes:
+            brief += " Reuse the proven editorial patterns from memory where they still fit the current topic."
+        if research.present:
+            brief += f" Current lead fact: {research.present[0]}"
+        if research.past:
+            brief += f" Background to connect: {research.past[0]}"
+        if research.future:
+            brief += f" Next step to watch: {research.future[0]}"
+
+        return ContentPlan(
+            audience=audience,
+            tone="professional, factual, attribution-first newsroom style",
+            primary_keyword=primary_keyword,
+            article_type=article_type,
+            secondary_keywords=keywords,
+            sections=sections,
+            brief=brief,
+            memory_notes=memory_notes,
+        )
+
+
+class PlanningAgent(BaseAgent):
+    stage_name = "planner"
+
+    def __init__(self, service: ContentPlanningService, logger: PipelineLogger) -> None:
+        self.service = service
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None or context.run.selected_topic is None or context.run.research is None:
+            raise RuntimeError("Research packet is required before planning")
+
+        context.run.plan = self.service.build(context.run.selected_topic, context.run.research, context.run.memory)
+        self.logger.info(context.run, "Created content plan")
+--------------
+Publisher agent
+from __future__ import annotations
+
+import base64
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import json
+import re
+from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+from xmlrpc.client import ServerProxy
+
+try:
+    from markdown import markdown as render_markdown
+except ImportError:
+    render_markdown = None
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import PublishArtifact, WordPressAuthResult, WordPressPostMetadata, WordPressSyncResult
+from ..base import AgentContext, BaseAgent
+from ..helpers import serialize, slugify, tokenize
+
+
+WORDPRESS_CATEGORY_IDS = {
+        "US": 2,
+        "Politics": 3,
+        "Tech": 5,
+        "Sports": 9,
+        "Travel": 10,
+}
+
+WORDPRESS_CATEGORY_ALIASES = {
+    "us": "US",
+    "politics": "Politics",
+    "political": "Politics",
+    "tech": "Tech",
+    "technology": "Tech",
+    "sports": "Sports",
+    "sport": "Sports",
+    "travel": "Travel",
+}
+
+WORDPRESS_COUNTRY_CATEGORY_ALIASES = {
+    "us": "US",
+    "usa": "US",
+    "united states": "US",
+    "ca": "Canada",
+    "canada": "Canada",
+}
+
+WORDPRESS_UNSUPPORTED_CATEGORIES = {
+        "business",
+        "business and finance",
+        "finance",
+        "stock market",
+        "stocks",
+}
+
+WORDPRESS_DEFAULT_CATEGORIES = ["US", "Politics"]
+
+WORDPRESS_CREATE_POST_MUTATION = """\
+mutation CreatePostFromPipeline($input: CreatePostInput!) {
+    createPost(input: $input) {
+        post {
+            id
+            databaseId
+            title
+            slug
+            status
+            categories {
+                nodes {
+                    name
+                    slug
+                    databaseId
+                }
+            }
+        }
+    }
+}
+""".strip()
+
+WORDPRESS_VIEWER_QUERY = """\
+query WordPressViewer {
+    viewer {
+        databaseId
+        username
+        roles {
+            nodes {
+                name
+            }
+        }
+    }
+}
+""".strip()
+
+WORDPRESS_VIEWER_CAPABILITIES_QUERY = """\
+query WordPressViewerCapabilities {
+    viewer {
+        capabilities
+    }
+}
+""".strip()
+
+WORDPRESS_POST_SEO_QUERY = """\
+query WordPressPostSeo($id: ID!, $idType: PostIdType!) {
+    post(id: $id, idType: $idType) {
+        databaseId
+        seo {
+            metaDesc
+            title
+        }
+    }
+}
+""".strip()
+
+YOAST_META_DESCRIPTION_KEYS = [
+    "_yoast_wpseo_metadesc",
+    "yoast_wpseo_metadesc",
+]
+
+YOAST_FOCUS_KEYWORD_KEYS = [
+    "_yoast_wpseo_focuskw",
+    "yoast_wpseo_focuskw",
+]
+
+YOAST_XMLRPC_META_DESCRIPTION_KEY = "_yoast_wpseo_metadesc"
+YOAST_XMLRPC_FOCUS_KEYWORD_KEY = "_yoast_wpseo_focuskw"
+WORDPRESS_META_DESCRIPTION_LIMIT = 145
+
+
+class PublisherService:
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        self.root = Path(config.storage_root)
+        self.trends_dir = self.root / "trends"
+        self.blogs_dir = self.root / "blogs"
+        self.cache_dir = self.root / "cache"
+        self.topic_registry_path = self.cache_dir / "published_topics.json"
+
+        for directory in [self.root, self.trends_dir, self.blogs_dir, self.cache_dir]:
+            directory.mkdir(parents=True, exist_ok=True)
+
+    def save_trends(self, run_id: str, trends) -> Path:
+        path = self.trends_dir / f"{run_id}.json"
+        self._write_json(path, serialize(trends))
+        return path
+
+    def save_research_cache(self, run_id: str, research) -> Path:
+        path = self.cache_dir / f"research-{run_id}.json"
+        self._write_json(path, serialize(research))
+        return path
+
+    def save_run_cache(self, run) -> Path:
+        path = self.cache_dir / f"run-{run.run_id}.json"
+        self._write_json(path, serialize(run))
+        return path
+
+    def recently_published_cluster_keys(self) -> set[str]:
+        entries = self._load_topic_registry()
+        if not entries:
+            return set()
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.config.duplicate_lookback_hours)
+        cluster_keys: set[str] = set()
+        for entry in entries:
+            published_at = entry.get("published_at")
+            cluster_key = entry.get("cluster_key")
+            if not published_at or not cluster_key:
+                continue
+            try:
+                published_time = datetime.fromisoformat(published_at)
+            except ValueError:
+                continue
+            if published_time >= cutoff:
+                cluster_keys.add(cluster_key)
+        return cluster_keys
+
+    def publish(self, run) -> PublishArtifact:
+        if run.selected_topic is None or run.blog is None:
+            raise RuntimeError("Selected topic and article are required for publishing")
+
+        slug_source = run.blog.seo_keywords[0] if getattr(run.blog, "seo_keywords", None) else run.selected_topic.keyword
+        slug = slugify(slug_source)
+        markdown_path = self.blogs_dir / f"{slug}-{run.run_id}.md"
+        html_path = self.blogs_dir / f"{slug}-{run.run_id}.html"
+        metadata_path = self.cache_dir / f"publish-{slug}-{run.run_id}.json"
+        wordpress_metadata = self._build_wordpress_metadata(run, slug)
+
+        markdown_output = run.blog.article_markdown
+        html_output = run.blog.article_html or self._render_wordpress_html(run.blog.article_markdown)
+
+        markdown_path.write_text(markdown_output, encoding="utf-8")
+        html_path.write_text(html_output, encoding="utf-8")
+
+        wordpress_sync = None
+        if self.config.wordpress_sync_enabled:
+            wordpress_sync = self._sync_to_wordpress(run, wordpress_metadata, html_output)
+
+        artifact = PublishArtifact(
+            markdown_path=str(markdown_path),
+            metadata_path=str(metadata_path),
+            html_path=str(html_path),
+            wordpress=wordpress_metadata,
+            wordpress_sync=wordpress_sync,
+        )
+        self._write_json(
+            metadata_path,
+            {
+                "run": serialize(run),
+                "exports": serialize(artifact),
+                "wordpress": serialize(wordpress_metadata),
+                "wordpress_sync": serialize(wordpress_sync) if wordpress_sync is not None else None,
+                "debug": self._build_debug_snapshot(run, wordpress_metadata, html_output),
+            },
+        )
+        self._record_publication(run)
+        return artifact
+
+    def _build_debug_snapshot(self, run, wordpress_metadata: WordPressPostMetadata, html_output: str) -> dict[str, object]:
+        focus_keyword = ""
+        if getattr(run.blog, "seo_keywords", None):
+            focus_keyword = str(run.blog.seo_keywords[0] or "").strip()
+
+        visible_text = re.sub(r"<[^>]+>", " ", html_output or "")
+        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+        focus_keyword_occurrences = 0
+        if focus_keyword:
+            focus_keyword_occurrences = len(re.findall(re.escape(focus_keyword), visible_text, flags=re.IGNORECASE))
+
+        focus_tokens = [token for token in tokenize(focus_keyword) if len(token) > 2]
+        competing_anchors: list[dict[str, str]] = []
+        source_anchors: list[dict[str, str]] = []
+        for match in re.finditer(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', html_output or "", flags=re.IGNORECASE | re.DOTALL):
+            href = match.group(1).strip()
+            anchor_text = re.sub(r"<[^>]+>", " ", match.group(2))
+            anchor_text = re.sub(r"\s+", " ", anchor_text).strip()
+            if not anchor_text:
+                continue
+
+            source_anchors.append({"href": href, "text": anchor_text})
+            anchor_tokens = set(tokenize(anchor_text))
+            competes = False
+            if focus_keyword and focus_keyword.casefold() in anchor_text.casefold():
+                competes = True
+            elif focus_tokens and sum(1 for token in focus_tokens if token in anchor_tokens) >= min(2, len(focus_tokens)):
+                competes = True
+
+            if competes:
+                competing_anchors.append({"href": href, "text": anchor_text})
+
+        return {
+            "focus_keyword": focus_keyword,
+            "focus_keyword_occurrences": focus_keyword_occurrences,
+            "title_length": len(wordpress_metadata.title or ""),
+            "meta_description_length": len(wordpress_metadata.meta_description or ""),
+            "word_count": len(re.findall(r"\b\w+\b", visible_text)),
+            "competing_anchor_count": len(competing_anchors),
+            "competing_anchors": competing_anchors,
+            "anchors": source_anchors,
+            "validation_issues": list(getattr(getattr(run, "validation", None), "issues", []) or []),
+        }
+
+    def publish_newsroom_draft(self, dossier, draft, plan, saved_paths: dict[str, str]) -> PublishArtifact:
+        run_id = f"newsroom-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+        started_at = datetime.now(timezone.utc).isoformat()
+        slug = slugify(dossier.topic.keyword)
+
+        run = SimpleNamespace(
+            run_id=run_id,
+            started_at=started_at,
+            selected_topic=dossier.topic,
+            country=self.config.country,
+            plan=SimpleNamespace(audience=plan.angle),
+            validation=SimpleNamespace(publish=draft.publish_ready),
+            images=[],
+            blog=SimpleNamespace(
+                catchy_title=draft.headline,
+                meta_description=self._normalize_wordpress_meta_description(
+                    draft.dek or draft.summary or dossier.fact_spine.why_it_matters or draft.headline
+                ),
+                seo_keywords=self._newsroom_keywords(dossier),
+                article_markdown=draft.article_markdown,
+                article_html=draft.article_html,
+            ),
+        )
+
+        wordpress_metadata = self._build_wordpress_metadata(run, slug)
+        html_output = draft.article_html or self._render_wordpress_html(draft.article_markdown)
+
+        wordpress_sync = None
+        if self.config.wordpress_sync_enabled:
+            wordpress_sync = self._sync_to_wordpress(run, wordpress_metadata, html_output)
+
+        artifact = PublishArtifact(
+            markdown_path=saved_paths["markdown"],
+            metadata_path=saved_paths["json"],
+            html_path=saved_paths.get("html"),
+            wordpress=wordpress_metadata,
+            wordpress_sync=wordpress_sync,
+        )
+        publish_metadata_path = self.cache_dir / f"newsroom-publish-{slug}-{run_id}.json"
+        self._write_json(
+            publish_metadata_path,
+            {
+                "topic": dossier.topic.keyword,
+                "exports": serialize(artifact),
+                "wordpress": serialize(wordpress_metadata),
+                "wordpress_sync": serialize(wordpress_sync) if wordpress_sync is not None else None,
+            },
+        )
+        self._record_publication(run)
+        return artifact
+
+    def publish_newsroom_v3_draft(self, result, saved_paths: dict[str, object]) -> PublishArtifact:
+        if result.draft is None:
+            raise RuntimeError("A v3 draft is required before syncing to WordPress")
+
+        run = SimpleNamespace(
+            run_id=result.run_request.run_id,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            selected_topic=SimpleNamespace(
+                keyword=result.topic_candidate.keyword,
+                cluster_key=result.topic_candidate.cluster_key,
+            ),
+            country=self.config.country,
+            plan=SimpleNamespace(audience=result.topic_candidate.topic_family),
+            validation=SimpleNamespace(publish=result.validation.passed if result.validation is not None else False),
+            images=[],
+            blog=SimpleNamespace(
+                catchy_title=result.draft.headline,
+                meta_description=self._normalize_wordpress_meta_description(result.draft.dek or result.draft.headline),
+                seo_keywords=self._newsroom_v3_keywords(result),
+                article_markdown=result.draft.markdown,
+                article_html=result.draft.html,
+            ),
+        )
+
+        slug = slugify(result.topic_candidate.keyword)
+        wordpress_metadata = self._build_wordpress_metadata(run, slug)
+        html_output = result.draft.html
+
+        wordpress_sync = None
+        if self.config.wordpress_sync_enabled:
+            wordpress_sync = self._sync_to_wordpress(run, wordpress_metadata, html_output)
+
+        artifact = PublishArtifact(
+            markdown_path=str(saved_paths.get("markdown_export") or ""),
+            metadata_path=str(saved_paths.get("json_export") or ""),
+            html_path=str(saved_paths.get("html_export") or ""),
+            wordpress=wordpress_metadata,
+            wordpress_sync=wordpress_sync,
+        )
+        publish_metadata_path = self.cache_dir / f"newsroom-v3-publish-{slug}-{run.run_id}.json"
+        self._write_json(
+            publish_metadata_path,
+            {
+                "topic": result.topic_candidate.keyword,
+                "exports": serialize(artifact),
+                "wordpress": serialize(wordpress_metadata),
+                "wordpress_sync": serialize(wordpress_sync) if wordpress_sync is not None else None,
+            },
+        )
+        self._record_publication(run)
+        return artifact
+
+    def _build_wordpress_metadata(self, run, slug: str) -> WordPressPostMetadata:
+        featured_image = next((asset for asset in run.images if asset.image_path), None)
+        meta_description = self._normalize_wordpress_meta_description(run.blog.meta_description)
+        excerpt = meta_description
+        categories = self._resolve_wordpress_categories(
+            self._derive_categories(run.selected_topic.keyword, run.plan.audience if run.plan else ""),
+            country=run.country,
+        )
+        tags = [keyword for keyword in run.blog.seo_keywords if keyword][:8]
+        if run.selected_topic.keyword not in tags:
+            tags = [run.selected_topic.keyword, *tags][:8]
+
+        return WordPressPostMetadata(
+            title=run.blog.catchy_title,
+            slug=slug,
+            excerpt=excerpt,
+            meta_description=meta_description,
+            keywords=run.blog.seo_keywords,
+            categories=categories,
+            tags=tags,
+            post_status="publish" if run.validation and run.validation.publish else "draft",
+            featured_image_path=featured_image.image_path if featured_image is not None else None,
+            featured_image_alt=featured_image.alt_text if featured_image is not None else None,
+            featured_image_provider=featured_image.provider if featured_image is not None else None,
+        )
+
+    def _normalize_wordpress_meta_description(self, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value or "").strip()
+        if len(normalized) <= WORDPRESS_META_DESCRIPTION_LIMIT:
+            return normalized
+
+        shortened = normalized[: WORDPRESS_META_DESCRIPTION_LIMIT + 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        if shortened:
+            return shortened
+        return normalized[:WORDPRESS_META_DESCRIPTION_LIMIT].rstrip(" ,;:-")
+
+    def _derive_categories(self, topic_keyword: str, audience: str) -> list[str]:
+        tokens = set(tokenize(topic_keyword)) | set(tokenize(audience))
+        if tokens & {"cricket", "football", "sport", "sports", "ipl", "nhl", "nba", "match"}:
+            return ["Sports", "News"]
+        if tokens & {"finance", "earnings", "market", "business", "payments"}:
+            return ["Business", "Finance"]
+        if tokens & {"ai", "openai", "nvidia", "cloud", "security", "software", "tech", "agents"}:
+            return ["Technology", "Business"]
+        return ["News"]
+
+    def _newsroom_keywords(self, dossier) -> list[str]:
+        keywords = [dossier.topic.keyword.strip()]
+        for source in dossier.research.sources[:4]:
+            title = source.title.strip()
+            if title and title not in keywords:
+                keywords.append(title)
+        return keywords[:8]
+
+    def _newsroom_v3_keywords(self, result) -> list[str]:
+        keywords = [result.topic_candidate.keyword.strip()]
+        if result.writer_input is not None:
+            for source in result.writer_input.sources[:4]:
+                title = source.title.strip()
+                if title and title not in keywords:
+                    keywords.append(title)
+        return keywords[:8]
+
+    def _resolve_wordpress_categories(self, requested_names: list[str], country: str | None = None) -> list[str]:
+        resolved: list[str] = []
+
+        country_category = self._canonical_wordpress_country_category(country)
+        if country_category is not None:
+            resolved.append(country_category)
+
+        topical_found = False
+
+        configured_category = self._canonical_wordpress_category(self.config.topic_category)
+        if configured_category is not None:
+            resolved.append(configured_category)
+            topical_found = True
+
+        for name in requested_names:
+            canonical = self._canonical_wordpress_category(name)
+            if canonical is not None and canonical not in resolved:
+                resolved.append(canonical)
+                topical_found = True
+
+        if not topical_found:
+            return list(WORDPRESS_DEFAULT_CATEGORIES)
+        return resolved
+
+    def _canonical_wordpress_country_category(self, country: str | None) -> str | None:
+        if not country:
+            return None
+
+        normalized = str(country).strip().lower()
+        if not normalized:
+            return None
+
+        category = WORDPRESS_COUNTRY_CATEGORY_ALIASES.get(normalized)
+        if category is None:
+            return None
+        if category not in WORDPRESS_CATEGORY_IDS:
+            return None
+        return category
+
+    def _canonical_wordpress_category(self, name: str | None) -> str | None:
+        if not name:
+            return None
+
+        normalized = str(name).strip()
+        if not normalized:
+            return None
+        if normalized in WORDPRESS_CATEGORY_IDS:
+            return normalized
+
+        alias = normalized.lower().replace("_", " ")
+        if alias in WORDPRESS_UNSUPPORTED_CATEGORIES:
+            return None
+        return WORDPRESS_CATEGORY_ALIASES.get(alias)
+
+    def _wordpress_remote_status(self, wordpress_metadata: WordPressPostMetadata) -> str:
+        if self.config.wordpress_status == "publish":
+            return "PUBLISH"
+        if self.config.wordpress_status == "auto":
+            return "PUBLISH" if wordpress_metadata.post_status.lower() == "publish" else "DRAFT"
+        return "DRAFT"
+
+    def _sync_to_wordpress(
+        self,
+        run,
+        wordpress_metadata: WordPressPostMetadata,
+        html_output: str,
+    ) -> WordPressSyncResult:
+        auth = self.check_wordpress_auth()
+        if not auth.authenticated:
+            raise RuntimeError(
+                "WordPress auth check failed: WPGraphQL returned no authenticated viewer for the configured credentials"
+            )
+
+        category_names = self._resolve_wordpress_categories(wordpress_metadata.categories)
+        category_nodes = [{"id": str(WORDPRESS_CATEGORY_IDS[name])} for name in category_names]
+        requested_status = self._wordpress_remote_status(wordpress_metadata)
+        wordpress_content = self._prepare_wordpress_post_content(html_output)
+        payload = {
+            "input": {
+                "title": wordpress_metadata.title,
+                "slug": wordpress_metadata.slug,
+                "content": wordpress_content,
+                "status": requested_status,
+                "excerpt": wordpress_metadata.excerpt,
+                "categories": {"nodes": category_nodes},
+            }
+        }
+
+        response = self._graphql_request(WORDPRESS_CREATE_POST_MUTATION, payload)
+        if response.get("errors"):
+            raise RuntimeError(f"WordPress GraphQL returned errors: {response['errors']}")
+
+        post = response.get("data", {}).get("createPost", {}).get("post")
+        if not isinstance(post, dict):
+            raise RuntimeError("WordPress GraphQL response did not include createPost.post")
+
+        response_path = self.cache_dir / f"wordpress-sync-{run.run_id}.json"
+        self._write_json(response_path, response)
+
+        database_id = post.get("databaseId")
+        seo_synced, seo_update_method, seo_error = self._sync_wordpress_seo_metadata(
+            database_id,
+            wordpress_metadata,
+        )
+
+        return WordPressSyncResult(
+            synced=True,
+            endpoint=self.config.wordpress_graphql_url,
+            requested_status=requested_status,
+            remote_status=post.get("status"),
+            post_id=post.get("id"),
+            database_id=database_id,
+            slug=post.get("slug"),
+            categories=[node.get("name", "") for node in post.get("categories", {}).get("nodes", []) if node.get("name")],
+            response_path=str(response_path),
+            auth=auth,
+            seo_synced=seo_synced,
+            seo_update_method=seo_update_method,
+            seo_error=seo_error,
+        )
+
+    def _sync_wordpress_seo_metadata(
+        self,
+        database_id: int | None,
+        wordpress_metadata: WordPressPostMetadata,
+    ) -> tuple[bool, str | None, str | None]:
+        if database_id is None:
+            return False, None, "WordPress post databaseId missing from createPost response"
+
+        meta_description = wordpress_metadata.meta_description.strip()
+        if not meta_description:
+            return False, None, "Meta description is empty"
+
+        base_url = self._wordpress_rest_base_url()
+        if base_url is None:
+            return False, None, "Could not derive WordPress REST base URL from GraphQL endpoint"
+
+        focus_keyword = next((keyword.strip() for keyword in wordpress_metadata.keywords if keyword and keyword.strip()), "")
+        errors: list[str] = []
+
+        try:
+            self._update_wordpress_seo_metadata_via_xmlrpc(
+                database_id,
+                meta_description,
+                focus_keyword,
+            )
+            if self._wordpress_xmlrpc_fields_match(database_id, meta_description, focus_keyword):
+                return True, "xmlrpc-custom-fields", None
+            errors.append("xmlrpc-custom-fields: Yoast custom fields did not persist expected values")
+        except Exception as exc:
+            errors.append(f"xmlrpc-custom-fields: {exc}")
+
+        meta_payloads: list[tuple[str, dict[str, object]]] = []
+        for key in YOAST_META_DESCRIPTION_KEYS:
+            payload: dict[str, object] = {"meta": {key: meta_description}}
+            if focus_keyword:
+                payload["meta"].update({focus_key: focus_keyword for focus_key in YOAST_FOCUS_KEYWORD_KEYS})
+            meta_payloads.append((f"rest-meta:{key}", payload))
+
+        endpoint = f"{base_url}/wp-json/wp/v2/posts/{database_id}"
+        for method, payload in meta_payloads:
+            try:
+                self._wordpress_rest_request(endpoint, payload)
+            except RuntimeError as exc:
+                errors.append(f"{method}: {exc}")
+                continue
+
+            if self._wordpress_post_seo_matches(database_id, meta_description):
+                return True, method, None
+            errors.append(f"{method}: remote SEO metaDesc did not update")
+
+        error_message = "; ".join(errors) if errors else "No writable SEO metadata route was available"
+        return False, None, error_message
+
+    def _update_wordpress_seo_metadata_via_xmlrpc(
+        self,
+        database_id: int,
+        meta_description: str,
+        focus_keyword: str,
+    ) -> None:
+        client = self._wordpress_xmlrpc_client()
+        post = client.wp.getPost(
+            1,
+            self.config.wordpress_graphql_user,
+            self.config.wordpress_graphql_password,
+            database_id,
+        )
+        existing_fields = {
+            field.get("key"): field
+            for field in post.get("custom_fields", [])
+            if field.get("key")
+        }
+
+        updates = [
+            self._xmlrpc_custom_field_payload(
+                existing_fields.get(YOAST_XMLRPC_META_DESCRIPTION_KEY),
+                YOAST_XMLRPC_META_DESCRIPTION_KEY,
+                meta_description,
+            )
+        ]
+        if focus_keyword:
+            updates.append(
+                self._xmlrpc_custom_field_payload(
+                    existing_fields.get(YOAST_XMLRPC_FOCUS_KEYWORD_KEY),
+                    YOAST_XMLRPC_FOCUS_KEYWORD_KEY,
+                    focus_keyword,
+                )
+            )
+
+        client.wp.editPost(
+            1,
+            self.config.wordpress_graphql_user,
+            self.config.wordpress_graphql_password,
+            database_id,
+            {"custom_fields": updates},
+        )
+
+    def _wordpress_xmlrpc_fields_match(
+        self,
+        database_id: int,
+        meta_description: str,
+        focus_keyword: str,
+    ) -> bool:
+        client = self._wordpress_xmlrpc_client()
+        post = client.wp.getPost(
+            1,
+            self.config.wordpress_graphql_user,
+            self.config.wordpress_graphql_password,
+            database_id,
+        )
+        field_map = {
+            field.get("key"): str(field.get("value") or "")
+            for field in post.get("custom_fields", [])
+            if field.get("key")
+        }
+        if field_map.get(YOAST_XMLRPC_META_DESCRIPTION_KEY, "").strip() != meta_description:
+            return False
+        if focus_keyword and field_map.get(YOAST_XMLRPC_FOCUS_KEYWORD_KEY, "").strip() != focus_keyword:
+            return False
+        return self._wordpress_post_seo_matches(database_id, meta_description)
+
+    def _xmlrpc_custom_field_payload(self, existing_field, key: str, value: str) -> dict[str, str]:
+        payload = {"key": key, "value": value}
+        if existing_field is not None and existing_field.get("id") is not None:
+            payload["id"] = str(existing_field["id"])
+        return payload
+
+    def _wordpress_xmlrpc_client(self):
+        base_url = self._wordpress_rest_base_url()
+        if base_url is None:
+            raise RuntimeError("Could not derive WordPress XML-RPC URL from GraphQL endpoint")
+        return ServerProxy(f"{base_url}/xmlrpc.php")
+
+    def _wordpress_post_seo_matches(self, database_id: int, expected_meta_description: str) -> bool:
+        try:
+            response = self._graphql_request(
+                WORDPRESS_POST_SEO_QUERY,
+                {"id": str(database_id), "idType": "DATABASE_ID"},
+            )
+        except RuntimeError:
+            return False
+
+        if response.get("errors"):
+            return False
+
+        meta_description = (
+            response.get("data", {})
+            .get("post", {})
+            .get("seo", {})
+            .get("metaDesc")
+        )
+        return str(meta_description or "").strip() == expected_meta_description
+
+    def _wordpress_rest_base_url(self) -> str | None:
+        if not self.config.wordpress_graphql_url:
+            return None
+
+        graphql_url = self.config.wordpress_graphql_url.rstrip("/")
+        if graphql_url.endswith("/graphql"):
+            return graphql_url[: -len("/graphql")]
+        return graphql_url.rsplit("/", 1)[0] if "/" in graphql_url else None
+
+    def _wordpress_rest_request(self, url: str, payload: dict[str, object]) -> dict:
+        token = base64.b64encode(
+            f"{self.config.wordpress_graphql_user}:{self.config.wordpress_graphql_password}".encode("utf-8")
+        ).decode("ascii")
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+                ),
+                "Authorization": f"Basic {token}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            raise RuntimeError(f"WordPress REST HTTP {exc.code}: {body}") from exc
+
+    def _prepare_wordpress_post_content(self, html_output: str) -> str:
+        # WordPress stores the post title separately, so remove the first H1 block
+        # from synced content to avoid rendering the same title twice in the editor.
+        without_h1_block = re.sub(
+            r"\s*<!--\s*wp:heading\s*(\{\"level\":1\})?\s*-->\s*<h1[^>]*>.*?</h1>\s*<!--\s*/wp:heading\s*-->\s*",
+            "\n",
+            html_output,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        without_h1 = re.sub(
+            r"\s*<h1[^>]*>.*?</h1>\s*",
+            "\n",
+            without_h1_block,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return re.sub(r"\n{3,}", "\n\n", without_h1).strip()
+
+    def check_wordpress_auth(self) -> WordPressAuthResult:
+        if (
+            not self.config.wordpress_graphql_url
+            or not self.config.wordpress_graphql_user
+            or not self.config.wordpress_graphql_password
+        ):
+            raise RuntimeError(
+                "WordPress auth check requires WP_GRAPHQL_URL, WP_GRAPHQL_USER, and WP_GRAPHQL_PASSWORD"
+            )
+
+        response = self._graphql_request(WORDPRESS_VIEWER_QUERY, {})
+        if response.get("errors"):
+            raise RuntimeError(f"WordPress viewer query returned errors: {response['errors']}")
+
+        viewer = response.get("data", {}).get("viewer")
+        if not isinstance(viewer, dict):
+            return WordPressAuthResult(endpoint=self.config.wordpress_graphql_url, authenticated=False)
+
+        capabilities_response = self._graphql_request(WORDPRESS_VIEWER_CAPABILITIES_QUERY, {})
+        capabilities: list[str] = []
+        if not capabilities_response.get("errors"):
+            capability_viewer = capabilities_response.get("data", {}).get("viewer") or {}
+            raw_capabilities = capability_viewer.get("capabilities")
+            if isinstance(raw_capabilities, list):
+                capabilities = [capability for capability in raw_capabilities if isinstance(capability, str)]
+
+        return WordPressAuthResult(
+            endpoint=self.config.wordpress_graphql_url,
+            authenticated=True,
+            viewer_database_id=viewer.get("databaseId"),
+            viewer_username=viewer.get("username"),
+            viewer_roles=[
+                node.get("name", "")
+                for node in viewer.get("roles", {}).get("nodes", [])
+                if node.get("name")
+            ],
+            viewer_capabilities=capabilities,
+        )
+
+    def _graphql_request(self, query: str, variables: dict) -> dict:
+        token = base64.b64encode(
+            f"{self.config.wordpress_graphql_user}:{self.config.wordpress_graphql_password}".encode("utf-8")
+        ).decode("ascii")
+        payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+        url_parts = urlsplit(self.config.wordpress_graphql_url or "")
+        origin = f"{url_parts.scheme}://{url_parts.netloc}"
+        request = Request(
+            self.config.wordpress_graphql_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+                ),
+                "Origin": origin,
+                "Referer": f"{origin}/",
+                "Authorization": f"Basic {token}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            raise RuntimeError(f"WordPress GraphQL HTTP {exc.code}: {body}") from exc
+
+    def _render_wordpress_html(self, article_markdown: str) -> str:
+        if render_markdown is None:
+            raise RuntimeError("WordPress-ready HTML export requires the 'markdown' package")
+
+        article_html = render_markdown(article_markdown, extensions=["extra", "sane_lists"])
+        return (
+            "<article class=\"trend-agent-post\">\n"
+            f"{article_html}\n"
+            "</article>\n"
+        )
+
+    def _write_json(self, path: Path, payload) -> None:
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _load_topic_registry(self) -> list[dict]:
+        if not self.topic_registry_path.exists():
+            return []
+        try:
+            payload = json.loads(self.topic_registry_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        if isinstance(payload, list):
+            return payload
+        return []
+
+    def _record_publication(self, run) -> None:
+        if run.selected_topic is None:
+            return
+
+        entries = self._load_topic_registry()
+        entries.append(
+            {
+                "run_id": run.run_id,
+                "keyword": run.selected_topic.keyword,
+                "cluster_key": run.selected_topic.cluster_key or slugify(run.selected_topic.keyword),
+                "published_at": run.started_at,
+            }
+        )
+        self._write_json(self.topic_registry_path, entries)
+
+
+class PublisherAgent(BaseAgent):
+    stage_name = "publisher"
+
+    def __init__(self, service: PublisherService, memory_service, logger: PipelineLogger) -> None:
+        self.service = service
+        self.memory_service = memory_service
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None:
+            raise RuntimeError("Run context is missing before publishing")
+
+        context.run.published = self.service.publish(context.run)
+        self.service.save_run_cache(context.run)
+        self.memory_service.remember(context.run)
+        self.logger.info(context.run, f"Published WordPress assets to {context.run.published.html_path}")
+        if context.run.published.wordpress_sync is not None and context.run.published.wordpress_sync.synced:
+            self.logger.info(
+                context.run,
+                (
+                    "Synced WordPress post "
+                    f"{context.run.published.wordpress_sync.post_id} "
+                    f"with status {context.run.published.wordpress_sync.remote_status}"
+                ),
+            )
+        self.logger.transition(context.run, "completed")
+--------------
+Research agent
+from __future__ import annotations
+
+import json
+import re
+from collections import defaultdict
+from urllib.parse import urlsplit
+
+try:
+    from newspaper import Article
+except ImportError:
+    Article = None
+
+try:
+    from serpapi import GoogleSearch
+except ImportError:
+    GoogleSearch = None
+
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import ContextReference, ResearchClaim, ResearchPacket, ResearchSource, TrendTopic
+from ..base import AgentContext, BaseAgent
+from ..helpers import slugify, topic_category_query_hint
+
+
+class ResearchService:
+    CONTEXT_REFERENCE_LIMIT = 3
+    SOURCE_BOILERPLATE_PHRASES = {
+        "manage your tracker preferences",
+        "we use cookies and similar tracking technologies",
+        "we use technologies like cookies",
+        "privacy preference center",
+        "skip to main content",
+        "skip to navigation",
+        "skip to key events",
+        "skip navigation",
+        "live coverage",
+        "link copied",
+        "see all topics",
+        "for subscribers",
+        "subscribe for unlimited access",
+        "democracy dies in darkness",
+        "create free account",
+        "watchlist",
+        "investing club",
+        "join pro",
+        "livestream",
+        "facebooktweetemaillinkthreads",
+    }
+    QUERY_NOISE_TOKENS = {
+        "latest", "news", "cnn", "bbc", "axios", "politico", "update", "updates", "live", "breaking",
+        "analysis", "today",
+    }
+    PRESENT_HINTS = {"wins", "win", "won", "defeat", "beats", "projects", "projected", "advances", "passes", "announces"}
+    PAST_HINTS = {"previously", "earlier", "before", "since", "last", "former", "history", "background"}
+    FUTURE_HINTS = {"will", "next", "expected", "ahead", "upcoming", "plan", "plans", "could", "likely"}
+    ENTITY_PATTERN = re.compile(r"\b(?:[A-Z][a-z]+|[A-Z]{2,})(?:\s+(?:[A-Z][a-z]+|[A-Z]{2,})){0,2}\b")
+    ENTITY_STOPWORDS = {
+        "CNN", "NBC News", "The New York Times", "Fox News", "Reuters", "AP", "Associated Press",
+        "Live Updates", "Live Results", "Opinion", "Politics", "Breaking News", "Tuesday", "Wednesday",
+        "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Results", "Update", "Updates",
+    }
+    ENTITY_NOISE_TOKENS = {
+        "vs", "v", "match", "scorecard", "highlights", "live", "result", "results", "stats",
+        "preview", "today", "score", "scores", "primary", "runoff", "election", "elections",
+        "midterm", "midterms", "station", "district",
+    }
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+    def research(self, topic: TrendTopic, country: str) -> ResearchPacket:
+        if self.config.mock_mode or GoogleSearch is None or not self.config.serpapi_key:
+            return self._mock_research(topic)
+
+        query = self._build_query(topic.keyword)
+        category_hint = topic_category_query_hint(self.config.topic_category)
+        if category_hint:
+            query = f"{query} {category_hint}".strip()
+
+        params = {
+            "engine": "google_news",
+            "q": query,
+            "gl": country,
+            "hl": "en",
+            "api_key": self.config.serpapi_key,
+        }
+        response = GoogleSearch(params).get_dict()
+        items = response.get("news_results", [])[: self.config.research_results]
+
+        sources: list[ResearchSource] = []
+        for item in items:
+            publisher = item.get("source", "")
+            if isinstance(publisher, dict):
+                publisher = publisher.get("name", "")
+            url = item.get("link", "")
+            details = self.extract_source_details(
+                url,
+                publisher=str(publisher),
+                title=self._clean_source_text(item.get("title", topic.keyword), preserve_case=True),
+            )
+            sources.append(
+                ResearchSource(
+                    title=self._clean_source_text(item.get("title", topic.keyword), preserve_case=True),
+                    url=url,
+                    snippet=self._clean_source_text(item.get("snippet", "")),
+                    publisher=str(publisher),
+                    published_at=item.get("date", ""),
+                    content=details["content"],
+                    source_tier=self._source_tier(str(publisher), url),
+                    image_url=details["image_url"],
+                    image_caption=details["image_caption"],
+                    image_credit=details["image_credit"],
+                )
+            )
+
+        return self._build_packet(topic, sources)
+
+    def _build_query(self, topic_keyword: str) -> str:
+        tokens: list[str] = []
+        for token in re.split(r"\s+", topic_keyword or ""):
+            cleaned = token.strip(" ,.:;!?()[]{}\"'")
+            if not cleaned:
+                continue
+            if cleaned.casefold() in self.QUERY_NOISE_TOKENS:
+                continue
+            tokens.append(cleaned)
+
+        normalized = " ".join(tokens).strip()
+        return normalized or topic_keyword.strip()
+
+    def extract_article(self, url: str) -> str:
+        return self.extract_source_details(url).get("content", "")[:3000]
+
+    def extract_source_details(self, url: str, *, publisher: str = "", title: str = "") -> dict[str, str]:
+        firecrawl_details = self._extract_source_with_firecrawl(url, publisher=publisher, title=title)
+        if firecrawl_details["content"]:
+            return firecrawl_details
+
+        if not url or Article is None:
+            return {
+                "content": "",
+                "image_url": "",
+                "image_caption": "",
+                "image_credit": publisher.strip(),
+            }
+        try:
+            article = Article(url)
+            article.download()
+            article.parse()
+            return {
+                "content": article.text[:3000],
+                "image_url": str(getattr(article, "top_image", "") or "").strip(),
+                "image_caption": self._clean_source_text(title or getattr(article, "title", ""), preserve_case=True),
+                "image_credit": publisher.strip() or self._credit_from_url(url),
+            }
+        except Exception:
+            return {
+                "content": "",
+                "image_url": "",
+                "image_caption": "",
+                "image_credit": publisher.strip() or self._credit_from_url(url),
+            }
+
+    def _mock_research(self, topic: TrendTopic) -> ResearchPacket:
+        slug = topic.keyword.lower().replace(" ", "-")
+        sources = [
+            ResearchSource(
+                title=f"{topic.keyword}: what changed this week",
+                url=f"https://example.com/{slug}/weekly-update",
+                snippet=f"Analysts say {topic.keyword} is moving quickly because adoption and public interest rose across multiple markets.",
+                publisher="Example Wire",
+                published_at="2026-05-25",
+                source_tier="wire",
+                content=(
+                    f"{topic.keyword} is moving from headline attention into execution. Operators are comparing adoption, "
+                    "distribution, and commercial impact across markets."
+                ),
+            ),
+            ResearchSource(
+                title=f"Why {topic.keyword} is getting business attention",
+                url=f"https://example.com/{slug}/business-impact",
+                snippet=f"Operators are evaluating the revenue, operational, and product impact of {topic.keyword} for the next quarter.",
+                publisher="Business Daily",
+                published_at="2026-05-25",
+                source_tier="secondary",
+                content=(
+                    f"The market is treating {topic.keyword} as a strategic topic rather than a passing headline. "
+                    "Teams are using it to guide roadmap, communication, and content investment."
+                ),
+            ),
+            ResearchSource(
+                title=f"Experts outline the next phase of {topic.keyword}",
+                url=f"https://example.com/{slug}/next-phase",
+                snippet=f"Researchers expect {topic.keyword} to keep evolving as platforms add better tooling, regulation, and distribution.",
+                publisher="Tech Review Desk",
+                published_at="2026-05-25",
+                source_tier="secondary",
+                content=(
+                    f"Experts expect {topic.keyword} to develop through better tooling, more structured workflows, and clearer governance."
+                ),
+            ),
+        ]
+        return self._build_packet(topic, sources)
+
+    def _build_packet(
+        self,
+        topic: TrendTopic,
+        sources: list[ResearchSource],
+        country: str | None = None,
+    ) -> ResearchPacket:
+        facts: list[str] = []
+        context_blocks: list[str] = []
+        claims: list[ResearchClaim] = []
+        present: list[str] = []
+        past: list[str] = []
+        future: list[str] = []
+
+        for index, source in enumerate(sources, start=1):
+            fact_parts = self._dedupe_fact_parts(
+                [
+                    self._clean_source_text(source.title, preserve_case=True),
+                    self._clean_source_text(source.snippet),
+                    self._clean_source_text(source.content[:350].strip()),
+                ]
+            )
+            joined = self._collapse_repeated_sentences(". ".join(part for part in fact_parts if part).strip())
+            if joined:
+                facts.append(joined)
+                section = self._classify_fact_section(joined)
+                claims.append(
+                    ResearchClaim(
+                        claim=joined,
+                        source_title=source.title,
+                        source_url=source.url,
+                        source_tier=source.source_tier,
+                        section=section,
+                    )
+                )
+                if section == "past":
+                    past.append(joined)
+                elif section == "future":
+                    future.append(joined)
+                else:
+                    present.append(joined)
+
+            context_blocks.append(
+                "\n".join(
+                    [
+                        f"Source {index}",
+                        f"Title: {source.title}",
+                        f"Publisher: {source.publisher}",
+                        f"Tier: {source.source_tier}",
+                        f"URL: {source.url}",
+                        f"Snippet: {source.snippet}",
+                        f"Content: {source.content[:1200]}",
+                    ]
+                )
+            )
+
+        present = self._prioritize_present_facts(present, claims)
+        past = self._prioritize_non_opinion(past)
+        future = self._prioritize_non_opinion(future)
+
+        if not present:
+            present = facts[: min(3, len(facts))]
+        if not past and len(facts) > 1:
+            past = facts[1: min(3, len(facts))]
+        if not future:
+            future = [
+                f"Watch for the next confirmed development, official response, or measurable impact related to {topic.keyword}."
+            ]
+
+        lead = present[0] if present else (facts[0] if facts else topic.keyword)
+
+        context_references = self._build_context_references(topic, sources, country=country)
+
+        return ResearchPacket(
+            topic=topic.keyword,
+            sources=sources,
+            facts=facts,
+            context="\n\n---\n\n".join(context_blocks),
+            lead=lead,
+            present=present[:3],
+            past=past[:3],
+            future=future[:3],
+            claims=claims,
+            context_references=context_references,
+        )
+
+    def _extract_source_with_firecrawl(self, url: str, *, publisher: str = "", title: str = "") -> dict[str, str]:
+        if not url or not self.config.firecrawl_api_key:
+            return {
+                "content": "",
+                "image_url": "",
+                "image_caption": "",
+                "image_credit": publisher.strip() or self._credit_from_url(url),
+            }
+
+        payload = json.dumps({"url": url, "formats": ["markdown"]}).encode("utf-8")
+        request = Request(
+            "https://api.firecrawl.dev/v1/scrape",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.firecrawl_api_key}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=45) as response:
+                raw_payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, OSError, ValueError):
+            return {
+                "content": "",
+                "image_url": "",
+                "image_caption": "",
+                "image_credit": publisher.strip() or self._credit_from_url(url),
+            }
+
+        data = raw_payload.get("data") if isinstance(raw_payload, dict) else None
+        if not isinstance(data, dict):
+            return {
+                "content": "",
+                "image_url": "",
+                "image_caption": "",
+                "image_credit": publisher.strip() or self._credit_from_url(url),
+            }
+
+        markdown = data.get("markdown") or data.get("content") or ""
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        image_url = self._extract_firecrawl_image_url(data, metadata)
+        image_caption = self._clean_source_text(
+            metadata.get("title") or title or "",
+            preserve_case=True,
+        )
+        return {
+            "content": self._clean_scraped_text(str(markdown)) if markdown else "",
+            "image_url": image_url,
+            "image_caption": image_caption,
+            "image_credit": publisher.strip() or self._credit_from_url(url),
+        }
+
+    def _extract_article_with_firecrawl(self, url: str) -> str:
+        return self._extract_source_with_firecrawl(url).get("content", "")
+
+    def _extract_firecrawl_image_url(self, data: dict, metadata: dict[str, object]) -> str:
+        candidates = [
+            data.get("image"),
+            data.get("imageUrl"),
+            data.get("image_url"),
+            data.get("ogImage"),
+            metadata.get("image"),
+            metadata.get("imageUrl"),
+            metadata.get("image_url"),
+            metadata.get("ogImage"),
+            metadata.get("og:image"),
+            metadata.get("thumbnail"),
+            metadata.get("thumbnailUrl"),
+            data.get("images"),
+            metadata.get("images"),
+        ]
+        for candidate in candidates:
+            image_url = self._first_url_candidate(candidate)
+            if image_url:
+                return image_url
+        return ""
+
+    def _first_url_candidate(self, value: object) -> str:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+            return ""
+        if isinstance(value, dict):
+            for key in ("url", "src", "image", "imageUrl", "image_url"):
+                candidate = self._first_url_candidate(value.get(key))
+                if candidate:
+                    return candidate
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                candidate = self._first_url_candidate(item)
+                if candidate:
+                    return candidate
+        return ""
+
+    def _credit_from_url(self, url: str) -> str:
+        hostname = urlsplit(url).netloc.strip().lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        return hostname
+
+    def _clean_scraped_text(self, text: str) -> str:
+        raw_text = str(text or "")
+        lines = [line.strip() for line in raw_text.splitlines()]
+        non_empty_lines = [line for line in lines if line]
+        if len(non_empty_lines) >= 2:
+            first_line = non_empty_lines[0].lstrip("# ").strip()
+            second_line = non_empty_lines[1]
+            if first_line and second_line and not re.search(r"[.!?]$", first_line):
+                raw_text = "\n\n".join(non_empty_lines[1:])
+
+        cleaned = self._clean_source_text(raw_text)
+        had_terminal_punctuation = bool(re.search(r"[.!?]\s*$", raw_text))
+        if cleaned and had_terminal_punctuation and not re.search(r"[.!?]$", cleaned):
+            cleaned = f"{cleaned}."
+        return cleaned
+
+    def _clean_source_text(self, text: str, *, preserve_case: bool = False) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        normalized = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", normalized)
+        normalized = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", normalized)
+        normalized = re.sub(r"\b\d+\s+min\s+read\b", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\b\d+\s*(?:hr|hrs|hour|hours|min|mins|minute|minutes)\s+ago\b", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\b(?:updated|published)\b[^.]{0,80}\b(?:et|utc)\b", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"#\s*live updates?:", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+#\s*", " ", normalized)
+        normalized = re.sub(r"\bBy\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\b", " ", normalized)
+        normalized = re.sub(r"\bAnalysis by\b[^.]{0,120}", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\*\s*\*\s*\*", " ", normalized)
+        normalized = re.sub(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}(?:The\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})+\b", " ", normalized)
+
+        lowered = normalized.casefold()
+        for phrase in self.SOURCE_BOILERPLATE_PHRASES:
+            phrase_index = lowered.find(phrase)
+            if phrase_index != -1:
+                normalized = normalized[:phrase_index]
+                lowered = normalized.casefold()
+
+        sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+        if len(sentence_parts) >= 2 and sentence_parts[0].rstrip(".!?").casefold() == sentence_parts[1].rstrip(".!?").casefold():
+            normalized = sentence_parts[0]
+
+        normalized = re.sub(r"\s+", " ", normalized).strip(" -:|,.;")
+        if preserve_case or not normalized:
+            return normalized
+        return normalized
+
+    def _dedupe_fact_parts(self, parts: list[str]) -> list[str]:
+        unique_parts: list[str] = []
+        seen_keys: list[str] = []
+
+        for part in parts:
+            candidate = (part or "").strip()
+            if not candidate:
+                continue
+
+            sentences = self._split_sentences(candidate)
+            while sentences:
+                sentence_key = self._fact_key(sentences[0])
+                if sentence_key and any(sentence_key == key or sentence_key in key for key in seen_keys):
+                    sentences.pop(0)
+                    continue
+                break
+
+            candidate = " ".join(sentences).strip() if sentences else ""
+            candidate_key = self._fact_key(candidate)
+            if not candidate_key:
+                continue
+            if any(candidate_key == key or candidate_key in key or key in candidate_key for key in seen_keys):
+                continue
+
+            unique_parts.append(candidate)
+            seen_keys.append(candidate_key)
+
+        return unique_parts
+
+    def _collapse_repeated_sentences(self, text: str) -> str:
+        unique_sentences: list[str] = []
+        seen_keys: list[str] = []
+
+        for sentence in self._split_sentences(text):
+            sentence_key = self._fact_key(sentence)
+            if not sentence_key:
+                continue
+            if any(sentence_key == key or sentence_key in key or key in sentence_key for key in seen_keys):
+                continue
+            unique_sentences.append(sentence.rstrip(".!?"))
+            seen_keys.append(sentence_key)
+
+        if not unique_sentences:
+            return ""
+        return ". ".join(unique_sentences).strip() + "."
+
+    def _split_sentences(self, text: str) -> list[str]:
+        return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text or "") if part.strip()]
+
+    def _fact_key(self, text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (text or "").casefold()).strip()
+
+    def _classify_fact_section(self, fact: str) -> str:
+        lowered = fact.lower()
+        if "opinion" in lowered:
+            return "past"
+        if any(token in lowered for token in self.PRESENT_HINTS):
+            return "present"
+        if any(token in lowered for token in self.PAST_HINTS):
+            return "past"
+        if any(token in lowered for token in self.FUTURE_HINTS):
+            return "future"
+        return "present"
+
+    def _prioritize_present_facts(self, present: list[str], claims: list[ResearchClaim]) -> list[str]:
+        ordered: list[str] = []
+        preferred_claims = sorted(
+            [claim for claim in claims if claim.section == "present"],
+            key=lambda claim: (
+                "opinion" in claim.source_title.lower(),
+                0 if claim.source_tier in {"wire", "primary"} else 1,
+            ),
+        )
+        for claim in preferred_claims:
+            if claim.claim not in ordered:
+                ordered.append(claim.claim)
+        for fact in present:
+            if fact not in ordered:
+                ordered.append(fact)
+        return ordered
+
+    def _prioritize_non_opinion(self, facts: list[str]) -> list[str]:
+        non_opinion = [fact for fact in facts if "opinion" not in fact.lower()]
+        return non_opinion or facts
+
+    def _source_tier(self, publisher: str, url: str) -> str:
+        lowered = f"{publisher} {url}".lower()
+        if any(token in lowered for token in {"reuters", "associated press", "ap news", "afp", "bloomberg"}):
+            return "wire"
+        if any(token in lowered for token in {".gov", ".mil", ".edu", "whitehouse.gov", "sec.gov", "supremecourt.gov"}):
+            return "primary"
+        return "secondary"
+
+    def _build_context_references(
+        self,
+        topic: TrendTopic,
+        sources: list[ResearchSource],
+        country: str | None = None,
+    ) -> list[ContextReference]:
+        if not sources:
+            return []
+
+        candidates = self._extract_reference_candidates(topic, sources)
+        if not candidates:
+            return []
+
+        if self.config.mock_mode or GoogleSearch is None or not self.config.serpapi_key:
+            return self._mock_context_references(candidates)
+
+        references: list[ContextReference] = []
+        for candidate in candidates[: self.CONTEXT_REFERENCE_LIMIT]:
+            reference = self._search_context_reference(candidate, country or self.config.country)
+            if reference is not None:
+                references.append(reference)
+        return references
+
+    def _extract_reference_candidates(self, topic: TrendTopic, sources: list[ResearchSource]) -> list[str]:
+        scores: dict[str, int] = defaultdict(int)
+        display_names: dict[str, str] = {}
+        banned_publishers = {source.publisher.strip().casefold() for source in sources if source.publisher.strip()}
+
+        def add_candidate(candidate: str, weight: int) -> None:
+            cleaned = self._normalize_entity_candidate(candidate)
+            if not cleaned:
+                return
+            key = cleaned.casefold()
+            scores[key] += weight
+            current = display_names.get(key, "")
+            if not current or self._display_priority(cleaned) > self._display_priority(current):
+                display_names[key] = cleaned
+
+        topic_text = topic.keyword.strip()
+        if topic_text:
+            add_candidate(topic_text, 5)
+
+        for source in sources:
+            for candidate in self.ENTITY_PATTERN.findall(source.title or ""):
+                add_candidate(candidate, 3)
+            snippet_text = f"{source.snippet} {source.content[:500]}"
+            for candidate in self.ENTITY_PATTERN.findall(snippet_text):
+                add_candidate(candidate, 1)
+
+        ordered = sorted(
+            scores.items(),
+            key=lambda item: (
+                display_names.get(item[0], "").casefold() in banned_publishers,
+                len(display_names.get(item[0], "").split()) == 1,
+                -item[1],
+                display_names.get(item[0], ""),
+            ),
+        )
+        return [display_names[key] for key, _ in ordered if display_names.get(key, "").casefold() not in banned_publishers][: self.CONTEXT_REFERENCE_LIMIT + 2]
+
+    def _display_priority(self, value: str) -> tuple[int, int, int]:
+        return (
+            sum(1 for char in value if char.isupper()),
+            int(any(char.isupper() for char in value)),
+            len(value),
+        )
+
+    def _normalize_entity_candidate(self, candidate: str) -> str | None:
+        cleaned = re.sub(r"\s+", " ", candidate).strip(" -:|,.;()[]{}")
+        cleaned = re.sub(
+            r"^(?:President|Senator|Sen\.?|Representative|Rep\.?|Governor|Gov\.?|Attorney General|State Representative|State Rep\.?|State Senator|State Sen\.?|U\.S\. Representative|U\.S\. Rep\.?|U\.S\. Senator|U\.S\. Sen\.?)\s+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not cleaned:
+            return None
+        if cleaned in self.ENTITY_STOPWORDS:
+            return None
+        if len(cleaned) < 3:
+            return None
+        if re.search(r"[A-Za-z]", cleaned) and re.search(r"[^\x00-\x7F]", cleaned):
+            return None
+        if len(cleaned.split()) > 4:
+            return None
+        if cleaned.isupper() and len(cleaned) > 5:
+            return None
+        tokens = {token.casefold() for token in re.findall(r"[A-Za-z0-9']+", cleaned)}
+        if tokens & self.ENTITY_NOISE_TOKENS:
+            return None
+        if cleaned.islower():
+            cleaned = " ".join(word.capitalize() for word in cleaned.split())
+        return cleaned
+
+    def _mock_context_references(self, candidates: list[str]) -> list[ContextReference]:
+        references: list[ContextReference] = []
+        for candidate in candidates[: self.CONTEXT_REFERENCE_LIMIT]:
+            references.append(
+                ContextReference(
+                    entity=candidate,
+                    title=f"{candidate} background",
+                    url=f"https://en.wikipedia.org/wiki/{slugify(candidate).replace('-', '_')}",
+                    snippet=f"Reference background for {candidate}.",
+                    source="wikipedia",
+                    summary=f"Background context for {candidate} that helps explain the current story.",
+                )
+            )
+        return references
+
+    def _search_context_reference(self, entity: str, country: str) -> ContextReference | None:
+        queries = [f"{entity} wikipedia", entity]
+
+        for query in queries:
+            params = {
+                "engine": "google",
+                "q": query,
+                "gl": country,
+                "hl": "en",
+                "num": 5,
+                "api_key": self.config.serpapi_key,
+            }
+            try:
+                payload = GoogleSearch(params).get_dict()
+            except Exception:
+                continue
+
+            organic_results = payload.get("organic_results", [])
+            if not organic_results:
+                continue
+
+            preferred = next(
+                (item for item in organic_results if "wikipedia.org" in str(item.get("link", "")).lower()),
+                organic_results[0],
+            )
+            url = str(preferred.get("link", "")).strip()
+            if not url or "translate.google." in url.lower():
+                continue
+
+            snippet = self._clean_reference_text(str(preferred.get("snippet", "") or ""))
+            title = str(preferred.get("title", entity)).strip() or entity
+            summary = self._clean_reference_text(self.extract_article(url))[:220] if self.config.firecrawl_api_key else ""
+            source = "wikipedia" if "wikipedia.org" in url.lower() else "background"
+
+            return ContextReference(
+                entity=entity,
+                title=title,
+                url=url,
+                snippet=snippet,
+                source=source,
+                summary=summary,
+            )
+
+        return None
+
+    def _clean_reference_text(self, value: str) -> str:
+        cleaned = value or ""
+        cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", cleaned)
+        cleaned = re.sub(r"<br\s*/?>", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"https?://\S+", " ", cleaned)
+        cleaned = re.sub(r"\bFile:[^\s|)]+", " ", cleaned)
+        cleaned = re.sub(r"[\[\]{}|]", " ", cleaned)
+        cleaned = re.sub(r"#+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:|,.;")
+        return cleaned
+
+
+class ResearchAgent(BaseAgent):
+    stage_name = "research"
+
+    def __init__(self, service: ResearchService, publisher, logger: PipelineLogger) -> None:
+        self.service = service
+        self.publisher = publisher
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None or context.run.selected_topic is None:
+            raise RuntimeError("Selected topic is required before research")
+
+        research = self.service.research(context.run.selected_topic, context.run.country)
+        context.run.research = research
+        self.publisher.save_research_cache(context.run.run_id, research)
+        self.logger.info(context.run, f"Built research packet with {len(research.sources)} sources")
+        self.logger.transition(context.run, "research_done")
+------------
+Selector Agent
+
+from __future__ import annotations
+
+try:
+    from serpapi import GoogleSearch
+except ImportError:
+    GoogleSearch = None
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import TrendTopic
+from ..base import AgentContext, BaseAgent
+from ..helpers import safe_int, topic_category_trends_filter_id
+
+
+class TrendAcquisitionService:
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+    def fetch(self, country: str, limit: int) -> list[TrendTopic]:
+        if self.config.mock_mode or GoogleSearch is None or not self.config.serpapi_key:
+            return self._mock_trends(limit)
+
+        params = {
+            "engine": "google_trends_trending_now",
+            "geo": country,
+            "hours": self.config.trend_window_hours,
+            "api_key": self.config.serpapi_key,
+        }
+        category_id = topic_category_trends_filter_id(self.config.topic_category)
+        if category_id is not None:
+            params["category_id"] = category_id
+        response = GoogleSearch(params).get_dict()
+        return self.parse(response, limit)
+
+    def parse(self, response: dict, limit: int) -> list[TrendTopic]:
+        items = response.get("trending_searches", [])
+        trends: list[TrendTopic] = []
+
+        for item in items[:limit]:
+            trends.append(
+                TrendTopic(
+                    keyword=item.get("query", "").strip(),
+                    traffic=safe_int(item.get("search_volume")),
+                    source="google_trends",
+                )
+            )
+        return trends
+
+    def from_seed_topics(self, topics: list[str], limit: int) -> list[TrendTopic]:
+        return [
+            TrendTopic(keyword=topic, traffic=1_000_000 - (index * 50_000), source="seed")
+            for index, topic in enumerate(topics[:limit])
+        ]
+
+    def _mock_trends(self, limit: int) -> list[TrendTopic]:
+        demo = [
+            TrendTopic(keyword="AI agents", traffic=2_000_000, source="mock"),
+            TrendTopic(keyword="OpenAI product launch", traffic=1_700_000, source="mock"),
+            TrendTopic(keyword="NVIDIA earnings", traffic=1_500_000, source="mock"),
+            TrendTopic(keyword="India digital payments", traffic=950_000, source="mock"),
+            TrendTopic(keyword="Cloud security trends", traffic=870_000, source="mock"),
+        ]
+        return demo[:limit]
+
+
+class TrendAgent(BaseAgent):
+    stage_name = "trends"
+
+    def __init__(self, service: TrendAcquisitionService, publisher, logger: PipelineLogger, config: AppConfig) -> None:
+        self.service = service
+        self.publisher = publisher
+        self.logger = logger
+        self.config = config
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None:
+            raise RuntimeError("Run context is missing before trend acquisition")
+
+        if context.seed_topics:
+            trends = self.service.from_seed_topics(context.seed_topics, self.config.max_topics)
+        else:
+            trends = self.service.fetch(context.run.country, context.run.max_topics)
+
+        context.run.trends = trends
+        self.logger.info(context.run, f"Collected {len(trends)} trend signals")
+        self.logger.transition(context.run, "trends_fetched")
+        self.publisher.save_trends(context.run.run_id, trends)
+-------------
+Trigger Agent
+
+from __future__ import annotations
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import PipelineRun
+from ..base import AgentContext, BaseAgent
+
+
+class TriggerService:
+    def __init__(self, config: AppConfig, logger: PipelineLogger) -> None:
+        self.config = config
+        self.logger = logger
+
+    def start_run(self, trigger_source: str) -> PipelineRun:
+        run = PipelineRun.create(
+            trigger_source=trigger_source,
+            country=self.config.country,
+            max_topics=self.config.max_topics,
+        )
+        self.logger.info(run, "Trigger received")
+        self.logger.info(run, "Pipeline started")
+        return run
+
+
+class TriggerAgent(BaseAgent):
+    stage_name = "trigger"
+
+    def __init__(self, service: TriggerService) -> None:
+        self.service = service
+
+    def execute(self, context: AgentContext) -> None:
+        context.run = self.service.start_run(context.trigger_source)
+--------------
+Validator agent
+
+from __future__ import annotations
+
+import re
+from urllib.parse import urlsplit
+
+from ...core.config import AppConfig
+from ...core.logger import PipelineLogger
+from ...models import ContentPlan, GeneratedArticle, ResearchPacket, ValidationResult
+from ..base import AgentContext, BaseAgent
+
+
+class ValidationService:
+    ALLOWED_GUTENBERG_BLOCKS = {"heading", "paragraph", "list", "quote", "separator", "image"}
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+    def validate(self, article: GeneratedArticle, research: ResearchPacket, plan: ContentPlan) -> ValidationResult:
+        issues: list[str] = []
+        body = article.article_html.strip()
+        words = len(re.findall(r"\b\w+\b", self._visible_text(body)))
+        h1_count = self._tag_count(body, "h1")
+        h2_count = self._tag_count(body, "h2")
+        visible_text = self._visible_text(body)
+        attribution_hits = self._attribution_hits(visible_text, research)
+        keyword_in_title = plan.primary_keyword.lower() in article.catchy_title.lower()
+        keyword_in_meta = plan.primary_keyword.lower() in article.meta_description.lower()
+        keyword_in_h1 = plan.primary_keyword.lower() in self._extract_heading(body, "h1").lower()
+        has_article_wrapper = bool(re.search(r"<article\b[^>]*>", body, flags=re.IGNORECASE))
+        contains_markdown = bool(re.search(r"(^|\n)\s*#{1,6}\s+", body, flags=re.MULTILINE)) or "```" in body
+        block_names = self._extract_block_names(body)
+        unsupported_blocks = sorted(block_names - self.ALLOWED_GUTENBERG_BLOCKS)
+        long_paragraphs = self._long_paragraphs(body)
+        speculative_hits = self._speculative_sentences(visible_text)
+
+        seo_score = 50
+        quality_score = 50
+        grounding_score = 40
+
+        if body:
+            quality_score += 5
+        else:
+            issues.append("Missing WordPress HTML body")
+
+        if words >= self.config.min_article_words:
+            quality_score += 20
+        else:
+            issues.append(f"Article is too short: {words} words")
+
+        if h1_count == 1:
+            quality_score += 10
+        else:
+            issues.append("WordPress article must contain exactly one H1")
+
+        if 2 <= h2_count <= 3:
+            quality_score += 10
+        elif h2_count < 2:
+            issues.append("WordPress article needs at least 1 story H2 plus Sources")
+        else:
+            issues.append("WordPress article should use no more than 2 story H2 sections plus Sources")
+
+        if not long_paragraphs:
+            quality_score += 10
+        else:
+            issues.append("Paragraphs are too long for a news-style article")
+
+        if has_article_wrapper:
+            quality_score += 5
+        else:
+            issues.append("WordPress article must be wrapped in an <article> element")
+
+        if contains_markdown:
+            issues.append("WordPress article HTML still contains markdown markers")
+        else:
+            quality_score += 5
+
+        if block_names:
+            quality_score += 10
+        else:
+            issues.append("WordPress article must use Gutenberg block markup")
+
+        if unsupported_blocks:
+            issues.append(f"Unsupported Gutenberg blocks used: {', '.join(unsupported_blocks)}")
+
+        if speculative_hits:
+            issues.append("Article contains speculative language without clear attribution")
+
+        if len(article.image_prompts) == 3:
+            quality_score += 10
+        else:
+            issues.append("Image prompt count must be exactly 3")
+
+        if keyword_in_title:
+            seo_score += 20
+        else:
+            issues.append("Primary keyword missing from title")
+
+        if keyword_in_meta:
+            seo_score += 15
+        else:
+            issues.append("Primary keyword missing from meta description")
+
+        if keyword_in_h1:
+            seo_score += 15
+        else:
+            issues.append("Primary keyword missing from H1")
+
+        if attribution_hits >= 1:
+            grounding_score += 20
+        else:
+            issues.append("Missing attributed reporting in article body")
+
+        minimum_attribution_hits = min(2, len(research.sources))
+        if attribution_hits >= minimum_attribution_hits:
+            grounding_score += 30
+        else:
+            issues.append("Not enough attributed reporting sources in article body")
+
+        quality_score = min(quality_score, 100)
+        seo_score = min(seo_score, 100)
+        grounding_score = min(grounding_score, 100)
+        publish = not issues and min(quality_score, seo_score, grounding_score) >= 70
+
+        return ValidationResult(
+            quality_score=quality_score,
+            seo_score=seo_score,
+            grounding_score=grounding_score,
+            issues=issues,
+            publish=publish,
+        )
+
+    def _tag_count(self, article_html: str, tag: str) -> int:
+        return len(re.findall(rf"<{tag}\b", article_html, flags=re.IGNORECASE))
+
+    def _extract_heading(self, article_html: str, tag: str) -> str:
+        match = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", article_html, flags=re.IGNORECASE | re.DOTALL)
+        if match is None:
+            return ""
+        return self._visible_text(match.group(1)).strip()
+
+    def _visible_text(self, article_html: str) -> str:
+        return re.sub(r"<[^>]+>", " ", article_html)
+
+    def _extract_block_names(self, article_html: str) -> set[str]:
+        return {
+            match.group(1)
+            for match in re.finditer(r"<!--\s*wp:([a-z0-9-]+)(?:\s+[^>]*)?-->", article_html, flags=re.IGNORECASE)
+        }
+
+    def _attribution_hits(self, visible_text: str, research: ResearchPacket) -> int:
+        lowered = visible_text.lower()
+        hits = 0
+        seen: set[str] = set()
+        for source in research.sources:
+            publisher = (source.publisher or "").strip()
+            if publisher and publisher.lower() not in seen and publisher.lower() in lowered:
+                seen.add(publisher.lower())
+                hits += 1
+        if "according to" in lowered or "reported" in lowered:
+            hits += 1
+        return hits
+
+    def _long_paragraphs(self, article_html: str) -> list[str]:
+        paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", article_html, flags=re.IGNORECASE | re.DOTALL)
+        long_paragraphs: list[str] = []
+        for paragraph in paragraphs:
+            text = self._visible_text(paragraph).strip()
+            if not text:
+                continue
+            sentence_count = len(re.findall(r"[.!?]+", text))
+            word_count = len(re.findall(r"\b\w+\b", text))
+            if sentence_count > 3 or word_count > 90:
+                long_paragraphs.append(text)
+        return long_paragraphs
+
+    def _speculative_sentences(self, visible_text: str) -> list[str]:
+        sentences = re.split(r"(?<=[.!?])\s+", visible_text)
+        hits: list[str] = []
+        for sentence in sentences:
+            lowered = sentence.lower()
+            if not lowered:
+                continue
+            if not re.search(r"\b(may|could|likely|might)\b", lowered):
+                continue
+            if any(marker in lowered for marker in {"according to", "reported", "said", "expected", "projects", "forecast"}):
+                continue
+            hits.append(sentence.strip())
+        return hits
+
+class ReviewAgent(BaseAgent):
+    stage_name = "validator"
+
+    def __init__(self, service: ValidationService, logger: PipelineLogger) -> None:
+        self.service = service
+        self.logger = logger
+
+    def execute(self, context: AgentContext) -> None:
+        if context.run is None or context.run.blog is None or context.run.research is None or context.run.plan is None:
+            raise RuntimeError("Blog, research, and plan are required before validation")
+
+        context.run.validation = self.service.validate(context.run.blog, context.run.research, context.run.plan)
+        validation = context.run.validation
+        self.logger.info(
+            context.run,
+            "Validation scores - "
+            f"quality: {validation.quality_score}, seo: {validation.seo_score}, grounding: {validation.grounding_score}",
+        )
+---------------
+
+
+Final Pipeline
+from __future__ import annotations
+
+from typing import TypedDict
+import uuid
+
+try:
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+except ImportError:
+    END = None
+    InMemorySaver = None
+    START = None
+    StateGraph = None
+
+from .core import AppConfig, InMemoryStageQueue, PipelineLogger
+from .models import PipelineRun
+from .services import (
+    AgentContext,
+    BlogGenerationService,
+    ContentPlanningService,
+    EditorialMemoryService,
+    ImageAgent,
+    ImageEnrichmentService,
+    MemoryAgent,
+    PlanningAgent,
+    PublisherAgent,
+    PublisherService,
+    ResearchAgent,
+    ResearchService,
+    ReviewAgent,
+    SelectorAgent,
+    TopicIntelligenceService,
+    TrendAcquisitionService,
+    TrendAgent,
+    TriggerAgent,
+    TriggerService,
+    ValidationService,
+    WritingAgent,
+)
+
+
+STAGE_SEQUENCE = ["trigger", "trends", "selector", "research", "memory", "planner", "generator", "validator", "image", "publisher"]
+
+
+class PipelineState(TypedDict):
+    trigger_source: str
+    seed_topics: list[str] | None
+    run: PipelineRun | None
+
+
+class ContentPipeline:
+    def __init__(
+        self,
+        config: AppConfig,
+        trigger_service: TriggerService | None = None,
+        trend_service: TrendAcquisitionService | None = None,
+        topic_service: TopicIntelligenceService | None = None,
+        research_service: ResearchService | None = None,
+        editorial_memory_service: EditorialMemoryService | None = None,
+        planner_service: ContentPlanningService | None = None,
+        generator_service: BlogGenerationService | None = None,
+        validation_service: ValidationService | None = None,
+        image_service: ImageEnrichmentService | None = None,
+        publisher_service: PublisherService | None = None,
+    ) -> None:
+        self.config = config
+        self.logger = PipelineLogger()
+        self.editorial_memory_service = editorial_memory_service or EditorialMemoryService(config)
+        self.publisher_service = publisher_service or PublisherService(config)
+        self.trigger_agent = TriggerAgent(trigger_service or TriggerService(config, self.logger))
+        self.trend_agent = TrendAgent(
+            trend_service or TrendAcquisitionService(config),
+            self.publisher_service,
+            self.logger,
+            config,
+        )
+        self.selector_agent = SelectorAgent(
+            topic_service or TopicIntelligenceService(),
+            self.publisher_service,
+            self.logger,
+            config,
+        )
+        self.research_agent = ResearchAgent(
+            research_service or ResearchService(config),
+            self.publisher_service,
+            self.logger,
+        )
+        self.memory_agent = MemoryAgent(self.editorial_memory_service, self.logger)
+        self.planning_agent = PlanningAgent(planner_service or ContentPlanningService(config), self.logger)
+        self.writing_agent = WritingAgent(generator_service or BlogGenerationService(config), self.logger)
+        self.review_agent = ReviewAgent(validation_service or ValidationService(config), self.logger)
+        self.image_agent = ImageAgent(image_service or ImageEnrichmentService(config), self.logger)
+        self.publisher_agent = PublisherAgent(self.publisher_service, self.editorial_memory_service, self.logger)
+        self.agents = {
+            self.trigger_agent.stage_name: self.trigger_agent,
+            self.trend_agent.stage_name: self.trend_agent,
+            self.selector_agent.stage_name: self.selector_agent,
+            self.research_agent.stage_name: self.research_agent,
+            self.memory_agent.stage_name: self.memory_agent,
+            self.planning_agent.stage_name: self.planning_agent,
+            self.writing_agent.stage_name: self.writing_agent,
+            self.review_agent.stage_name: self.review_agent,
+            self.image_agent.stage_name: self.image_agent,
+            self.publisher_agent.stage_name: self.publisher_agent,
+        }
+        self._graph_app = None
+        self._graph_checkpointer = InMemorySaver() if InMemorySaver is not None else None
+        self._last_graph_run: PipelineRun | None = None
+        self._last_graph_thread_id: str | None = None
+
+    def run(self, trigger_source: str = "manual", seed_topics: list[str] | None = None) -> PipelineRun:
+        context = AgentContext(trigger_source=trigger_source, seed_topics=seed_topics)
+
+        try:
+            if self.config.orchestrator == "langgraph":
+                return self._run_langgraph(context)
+
+            return self._run_queue(context)
+
+        except Exception as exc:
+            if context.run is None and self._last_graph_run is not None:
+                context.run = self._last_graph_run
+            if context.run is not None:
+                self.logger.fail(context.run, f"Pipeline failed: {exc}")
+                self.publisher_service.save_run_cache(context.run)
+            raise
+
+    def _run_queue(self, context: AgentContext) -> PipelineRun:
+        stage_queue = InMemoryStageQueue(STAGE_SEQUENCE)
+
+        while stage_queue:
+            stage_event = stage_queue.dequeue()
+            self.agents[stage_event.name].execute(context)
+
+        if context.run is None:
+            raise RuntimeError("Pipeline finished without a run context")
+        return context.run
+
+    def _run_langgraph(self, context: AgentContext) -> PipelineRun:
+        if StateGraph is None or START is None or END is None or self._graph_checkpointer is None:
+            raise RuntimeError("LangGraph orchestration is not available. Install the 'langgraph' package.")
+
+        self._last_graph_run = None
+        thread_id = f"pipeline-{uuid.uuid4()}"
+        self._last_graph_thread_id = thread_id
+        initial_state: PipelineState = {
+            "trigger_source": context.trigger_source,
+            "seed_topics": context.seed_topics,
+            "run": context.run,
+        }
+        final_state = self._get_graph_app().invoke(initial_state, config={"configurable": {"thread_id": thread_id}})
+        context.run = final_state.get("run")
+
+        if context.run is None:
+            raise RuntimeError("LangGraph pipeline finished without a run context")
+        return context.run
+
+    def _get_graph_app(self):
+        if self._graph_app is None:
+            self._graph_app = self._build_langgraph_app()
+        return self._graph_app
+
+    def _build_langgraph_app(self):
+        builder = StateGraph(PipelineState)
+        for stage_name in STAGE_SEQUENCE:
+            builder.add_node(stage_name, self._graph_node(stage_name))
+
+        builder.add_edge(START, STAGE_SEQUENCE[0])
+        for current_stage, next_stage in zip(STAGE_SEQUENCE, STAGE_SEQUENCE[1:]):
+            builder.add_edge(current_stage, next_stage)
+        builder.add_edge(STAGE_SEQUENCE[-1], END)
+        return builder.compile(checkpointer=self._graph_checkpointer)
+
+    def _graph_node(self, stage_name: str):
+        agent = self.agents[stage_name]
+
+        def run_stage(state: PipelineState) -> dict[str, PipelineRun | None]:
+            context = AgentContext(
+                trigger_source=state["trigger_source"],
+                seed_topics=state.get("seed_topics"),
+                run=state.get("run"),
+            )
+            agent.execute(context)
+            self._last_graph_run = context.run
+            return {"run": context.run}
+
+        return run_stage
+        

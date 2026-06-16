@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Trend Agent Scheduler</title>
+</head>
+
+<body>
+
+    <h2>Trend Agent Scheduler</h2>
+
+    <form method="POST" action="/save">
+
+        <label>Country</label>
+        <br>
+        <select name="country">
+
+            {% for country in countries %}
+
+            <option
+                value="{{ country }}"
+                {% if country == config.country %}selected{% endif %}
+            >
+                {{ country }}
+            </option>
+
+            {% endfor %}
+
+        </select>
+
+        <br><br>
+
+        <label>Topic Category</label>
+        <br>
+        <select name="category">
+
+            {% for category in categories %}
+
+            <option
+                value="{{ category }}"
+                {% if category == config.category_name %}selected{% endif %}
+            >
+                {{ category }}
+            </option>
+
+            {% endfor %}
+
+        </select>
+
+        <br><br>
+
+        <p><strong>Run Frequency:</strong> Every 4 hours</p>
+
+        <button type="submit">
+            Save Scheduler
+        </button>
+
+    </form>
+
+    <hr>
+
+    <h3>Current Configuration</h3>
+
+    <ul>
+        <li><strong>Country:</strong> {{ config.country }}</li>
+        <li><strong>Category:</strong> {{ config.category_name }}</li>
+        <li><strong>Category ID:</strong> {{ config.category_id }}</li>
+        <li><strong>Topic Category:</strong> {{ config.topic_category }}</li>
+        <li><strong>Run Every:</strong> {{ config.schedule_every_hours }} hours</li>
+    </ul>
+
+    <hr>
+
+    <h3>Last Run Status</h3>
+
+    <ul>
+        <li><strong>Last Triggered At:</strong> {{ status.last_triggered_at or 'N/A' }}</li>
+        <li><strong>Main Status:</strong> {{ status.last_main_status }}</li>
+        <li><strong>Main Completed At:</strong> {{ status.last_main_at or 'N/A' }}</li>
+        <li><strong>Main Run ID:</strong> {{ status.last_main_run_id or 'N/A' }}</li>
+        <li><strong>API Status:</strong> {{ status.last_api_status }}</li>
+        <li><strong>API Completed At:</strong> {{ status.last_api_at or 'N/A' }}</li>
+        <li><strong>API HTML:</strong> {{ status.last_api_html or 'N/A' }}</li>
+        <li><strong>Last Error:</strong> {{ status.last_error or 'None' }}</li>
+    </ul>
+
+</body>
+
+</html>

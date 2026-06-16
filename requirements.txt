@@ -1,0 +1,11 @@
+groq
+google-search-results
+pandas
+python-dotenv
+newspaper3k
+lxml_html_clean
+langgraph
+markdown
+google-genai
+flask
+apscheduler

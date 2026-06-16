@@ -1,0 +1,15 @@
+{
+  "scheduler_status": "running",
+  "scheduler_updated_at": "2026-06-10T12:47:39.980876+00:00",
+  "scheduler_type": "alarm",
+  "scheduler_alarm_datetime": "2026-06-10T18:19",
+  "scheduler_enabled": true,
+  "last_error": "local_publish_html.py exit code 2",
+  "last_triggered_at": "2026-06-10T12:49:00.006066+00:00",
+  "last_main_status": "success",
+  "last_publish_status": "failed",
+  "last_main_at": "2026-06-10T12:50:02.319169+00:00",
+  "last_main_run_id": "c70ab0a2-c199-4b9e-8822-102125c7f598",
+  "last_publish_at": "2026-06-10T12:50:02.332746+00:00",
+  "last_publish_html": "/Users/mac6/Desktop/Projects/Agents/Trend agent/storage/blogs/wall-street-tech-stock-c70ab0a2-c199-4b9e-8822-102125c7f598.html"
+}
