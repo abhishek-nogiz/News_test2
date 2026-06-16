@@ -9,3 +9,4 @@ markdown
 google-genai
 flask
 apscheduler
+pymongo

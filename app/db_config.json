@@ -1,0 +1,11 @@
+{
+    "db_backend": "mongo",
+    "sqlite": {
+        "db_path": "app/scheduler.db"
+    },
+    "mongo": {
+        "db_name": "trend_scheduler",
+        "jobs_collection": "scheduler_jobs",
+        "history_collection": "execution_history"
+    }
+}
