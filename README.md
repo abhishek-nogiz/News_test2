@@ -244,7 +244,8 @@ PENDING FLOW: claim → source → section → final article
 export PUBLISHER_BEARER_TOKEN=''
 python3 app/publish_local_html.py --file "storage/blogs/did-spencer-pratt-win-6e2794fe-f255-41aa-bea0-812cc1242175.html" --status draft
 
-
+so updated the flow now we can choose the storing of scheduler 
+via db_config.json so read that and choose mongo or sqlite
 
 Newsroom draft runs now sync to WordPress as `draft` by default when WordPress credentials are configured. Use `--no-wordpress-sync` to keep exports local only.
 Newsroom v2 draft files are written under `storage/newsroom-v2` instead of `storage/blogs`.
