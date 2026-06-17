@@ -1,99 +1,2439 @@
-------------------------------------------------------
-app/templates/index.html
-
+----------------------------------------app/templates/index.html---------------------------------------
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trend Agent Scheduler</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --card: #1a1d27;
+            --card-border: #2a2d3a;
+            --text: #e4e4e7;
+            --text-muted: #9ca3af;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --input-bg: #12131a;
+            --input-border: #2a2d3a;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container { max-width: 920px; margin: 0 auto; }
+
+        /* ── Header ── */
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 1.75rem;
+        }
+        h2 { font-size: 1.75rem; font-weight: 700; color: #fff; }
+        .header-badge {
+            font-size: 0.7rem; padding: 0.25rem 0.6rem; border-radius: 20px;
+            background: rgba(99,102,241,0.15); color: var(--accent);
+            font-weight: 600; letter-spacing: 0.5px;
+        }
+
+        h3 {
+            font-size: 1.05rem; font-weight: 600; margin-bottom: 0.75rem; color: #fff;
+        }
+
+        /* ── Create button ── */
+        .btn-create {
+            display: flex; align-items: center; gap: 0.4rem;
+            background: var(--accent); color: #fff; border: none; border-radius: 8px;
+            padding: 0.55rem 1.2rem; font-size: 0.88rem; font-weight: 600;
+            cursor: pointer; transition: background 0.2s;
+        }
+        .btn-create:hover { background: var(--accent-hover); }
+        .btn-create svg { width: 16px; height: 16px; }
+
+        /* ── Card ── */
+        .card {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: 12px; padding: 1.5rem; margin-bottom: 1.25rem;
+        }
+
+        /* ── Job card ── */
+        .job-card {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: 12px; padding: 1.25rem 1.5rem; margin-bottom: 0.85rem;
+        }
+        .job-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 0.6rem;
+        }
+        .job-name { font-size: 1rem; font-weight: 600; color: #fff; }
+        .job-meta {
+            display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem;
+        }
+        .meta-tag {
+            font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 6px;
+            background: rgba(255,255,255,0.06); color: var(--text-muted);
+        }
+        .meta-tag.type-alarm { background: rgba(99,102,241,0.12); color: var(--accent-hover); }
+        .meta-tag.type-interval { background: rgba(34,197,94,0.12); color: var(--success); }
+        .meta-tag.type-all { background: rgba(168,85,247,0.12); color: #a855f7; }
+
+        .schedule-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0.45rem 0; border-top: 1px solid var(--card-border);
+            margin-top: 0.25rem;
+        }
+        .schedule-info {
+            font-size: 0.82rem; color: var(--text-muted);
+        }
+        .countdown {
+            font-size: 0.82rem; font-weight: 600; color: var(--warning);
+        }
+        .countdown.overdue { color: var(--danger); }
+
+        .job-actions {
+            display: flex; gap: 0.5rem; margin-top: 0.75rem;
+        }
+        .btn-sm {
+            font-size: 0.78rem; padding: 0.35rem 0.75rem; border-radius: 6px;
+            cursor: pointer; font-weight: 500; transition: all 0.15s; border: 1px solid transparent;
+        }
+        .btn-run-sm {
+            background: transparent; color: var(--success); border-color: var(--success);
+        }
+        .btn-run-sm:hover { background: var(--success); color: #fff; }
+        .btn-pause-sm {
+            background: transparent; color: var(--warning); border-color: var(--warning);
+        }
+        .btn-pause-sm:hover { background: var(--warning); color: #000; }
+        .btn-resume-sm {
+            background: transparent; color: var(--info); border-color: var(--info);
+        }
+        .btn-resume-sm:hover { background: var(--info); color: #fff; }
+        .btn-edit-sm {
+            background: transparent; color: var(--accent-hover); border-color: var(--accent);
+        }
+        .btn-edit-sm:hover { background: var(--accent); color: #fff; }
+        .btn-delete-sm {
+            background: transparent; color: var(--danger); border-color: var(--danger);
+        }
+        .btn-delete-sm:hover { background: var(--danger); color: #fff; }
+
+        /* ── Badges ── */
+        .badge {
+            display: inline-block; padding: 0.12rem 0.5rem; border-radius: 20px;
+            font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+        }
+        .badge-pending   { background: rgba(99,102,241,0.15); color: var(--accent-hover); }
+        .badge-running   { background: rgba(59,130,246,0.15); color: var(--info); }
+        .badge-paused    { background: rgba(245,158,11,0.15); color: var(--warning); }
+        .badge-completed { background: rgba(34,197,94,0.15); color: var(--success); }
+        .badge-failed    { background: rgba(239,68,68,0.15); color: var(--danger); }
+        .badge-cancelled { background: rgba(156,163,175,0.15); color: var(--text-muted); }
+        .badge-success   { background: rgba(34,197,94,0.15); color: var(--success); }
+        .badge-skipped   { background: rgba(245,158,11,0.15); color: var(--warning); }
+        .badge-never     { background: rgba(156,163,175,0.15); color: var(--text-muted); }
+
+        /* ── Pulse for running ── */
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        .badge-running { animation: pulse 1.5s ease-in-out infinite; }
+
+        /* ── Empty state ── */
+        .empty {
+            text-align: center; padding: 2rem 0; color: var(--text-muted); font-size: 0.9rem;
+        }
+
+        /* ── Section divider ── */
+        .section-head {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 0.75rem;
+        }
+
+        /* ── History table ── */
+        .history-table { width: 100%; border-collapse: collapse; }
+        .history-table th {
+            text-align: left; font-size: 0.75rem; text-transform: uppercase;
+            letter-spacing: 0.5px; color: var(--text-muted); padding: 0.5rem 0.5rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+        .history-table td {
+            padding: 0.5rem 0.5rem; font-size: 0.82rem; border-bottom: 1px solid var(--card-border);
+        }
+        .history-table tr:last-child td { border-bottom: none; }
+
+        /* ── Modal ── */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; z-index: 100;
+            background: rgba(0,0,0,0.65); justify-content: center; align-items: center;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: 14px; padding: 1.75rem; width: 480px; max-width: 95vw;
+            max-height: 90vh; overflow-y: auto;
+        }
+        .modal h3 { margin-bottom: 1rem; }
+
+        label {
+            display: block; font-size: 0.78rem; font-weight: 500;
+            color: var(--text-muted); margin-bottom: 0.3rem;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .form-group { margin-bottom: 1rem; }
+
+        select, input[type="number"], input[type="text"], input[type="datetime-local"] {
+            width: 100%; padding: 0.55rem 0.75rem; background: var(--input-bg);
+            border: 1px solid var(--input-border); border-radius: 8px;
+            color: var(--text); font-size: 0.88rem; outline: none;
+            transition: border-color 0.2s;
+        }
+        select:focus, input:focus { border-color: var(--accent); }
+
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+        .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
+
+        /* Toggle button group */
+        .toggle-group {
+            display: flex; border-radius: 8px; overflow: hidden;
+            border: 1px solid var(--input-border);
+        }
+        .toggle-group input[type="radio"] { display: none; }
+        .toggle-group label {
+            flex: 1; text-align: center; padding: 0.55rem 0.75rem; cursor: pointer;
+            font-size: 0.82rem; font-weight: 500; text-transform: none; letter-spacing: 0;
+            color: var(--text-muted); background: var(--input-bg); transition: all 0.2s;
+            margin-bottom: 0;
+        }
+        .toggle-group input[type="radio"]:checked + label {
+            background: var(--accent); color: #fff;
+        }
+        .toggle-group label:hover { color: var(--text); }
+
+        .modal-actions {
+            display: flex; gap: 0.65rem; margin-top: 1.25rem; justify-content: flex-end;
+        }
+        .btn-cancel {
+            background: transparent; color: var(--text-muted); border: 1px solid var(--card-border);
+            border-radius: 8px; padding: 0.55rem 1.2rem; font-size: 0.88rem;
+            cursor: pointer; font-weight: 500;
+        }
+        .btn-cancel:hover { border-color: var(--text-muted); color: var(--text); }
+        .btn-save {
+            background: var(--accent); color: #fff; border: none; border-radius: 8px;
+            padding: 0.55rem 1.2rem; font-size: 0.88rem; cursor: pointer; font-weight: 600;
+        }
+        .btn-save:hover { background: var(--accent-hover); }
+
+        .description {
+            color: var(--text-muted); font-size: 0.78rem; margin-top: 0.3rem; line-height: 1.45;
+        }
+
+        /* ── Error banner ── */
+        .error-banner {
+            background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.25);
+            border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;
+            font-size: 0.82rem; color: var(--danger); display: none;
+        }
+
+        /* ── Responsive ── */
+        @media (max-width: 600px) {
+            .form-row, .form-row-3 { grid-template-columns: 1fr; }
+            body { padding: 1rem; }
+            .job-actions { flex-wrap: wrap; }
+        }
+    </style>
 </head>
 
 <body>
 
-    <h2>Trend Agent Scheduler</h2>
+<div class="container">
 
-    <form method="POST" action="/save">
+    <!-- ── Header ── -->
+    <div class="header">
+        <h2>Trend Agent Scheduler</h2>
+        <div style="display:flex;align-items:center;gap:0.75rem">
+            <span class="header-badge">STANDALONE</span>
+            <button class="btn-create" onclick="openCreateModal()">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v10M3 8h10"/></svg>
+                Create Job
+            </button>
+        </div>
+    </div>
 
-        <label>Country</label>
-        <br>
-        <select name="country">
+    <!-- ── Active Jobs ── -->
+    <div class="section-head">
+        <h3 style="margin:0">Active Jobs</h3>
+    </div>
+    <div id="active-jobs">
+        <div class="empty">No active jobs — click <strong>Create Job</strong> to get started.</div>
+    </div>
 
-            {% for country in countries %}
+    <!-- ── Past Jobs ── -->
+    <div class="section-head" id="past-section" style="display:none;margin-top:1.25rem">
+        <h3 style="margin:0">Past Jobs</h3>
+    </div>
+    <div id="past-jobs"></div>
 
-            <option
-                value="{{ country }}"
-                {% if country == config.country %}selected{% endif %}
-            >
-                {{ country }}
-            </option>
+    <!-- ── Execution History ── -->
+    <div class="section-head" style="margin-top:1.75rem">
+        <h3 style="margin:0">Execution History</h3>
+    </div>
+    <div class="card" style="padding:0; overflow-x:auto">
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Job</th>
+                    <th>Trigger</th>
+                    <th>Pipeline</th>
+                    <th>Publish</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody id="history-body">
+                <tr><td colspan="6" class="empty">No executions yet.</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
 
-            {% endfor %}
+<!-- ── Create / Edit Modal ── -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModalOutside(event)">
+    <div class="modal">
+        <h3 id="modal-title">Create New Job</h3>
+        <div class="error-banner" id="modal-error"></div>
+        <input type="hidden" id="edit-job-id" value="">
 
-        </select>
+        <div class="form-group">
+            <label>Job Name</label>
+            <input type="text" id="f-name" placeholder="e.g. US Politics Daily">
+        </div>
 
-        <br><br>
+        <div class="form-group">
+            <label>Job Type</label>
+            <div class="toggle-group">
+                <input type="radio" id="f-type-alarm" name="f-type" value="alarm">
+                <label for="f-type-alarm">One Time</label>
+                <input type="radio" id="f-type-interval" name="f-type" value="interval" checked>
+                <label for="f-type-interval">Recurring</label>
+            </div>
+        </div>
 
-        <label>Topic Category</label>
-        <br>
-        <select name="category">
+        <!-- Alarm fields -->
+        <div class="form-group" id="f-alarm-group" style="display:none">
+            <label>Date &amp; Time</label>
+            <input type="datetime-local" id="f-run-at">
+            <p class="description">Runs the pipeline once at the specified time. Must be in the future.</p>
+        </div>
 
-            {% for category in categories %}
+        <!-- Interval fields -->
+        <div class="form-group" id="f-interval-group">
+            <label>Run Every N Hours</label>
+            <input type="number" id="f-interval" min="1" max="168" value="4">
+            <p class="description">Runs the pipeline on a recurring schedule. First run starts after the first interval elapses.</p>
+        </div>
 
-            <option
-                value="{{ category }}"
-                {% if category == config.category_name %}selected{% endif %}
-            >
-                {{ category }}
-            </option>
+        <div class="form-row-3">
+            <div class="form-group">
+                <label>Country</label>
+                <select id="f-country">
+                    {% for c in countries %}
+                    <option value="{{ c }}">{{ c }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Category</label>
+                <select id="f-category">
+                    <option value="All Categories" selected>All Categories (runs all 5)</option>
+                    {% for name, details in categories.items() %}
+                    <option value="{{ name }}">{{ name }}</option>
+                    {% endfor %}
+                </select>
+                <p class="description">"All Categories" runs Politics → Sports → Technology → Business &amp; Finance → Travel sequentially.</p>
+            </div>
+            <div class="form-group">
+                <label>WP Status</label>
+                <select id="f-wp-status">
+                    {% for s in wordpress_statuses %}
+                    <option value="{{ s }}">{{ s | capitalize }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
 
-            {% endfor %}
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+            <button class="btn-save" onclick="saveJob()">Save</button>
+        </div>
+    </div>
+</div>
 
-        </select>
+<script>
+// ── Category map from server ──
+const CATEGORY_MAP = {{ categories | tojson }};
 
-        <br><br>
+// ── State ──
+let allJobs = [];
+let allHistory = [];
 
-        <p><strong>Run Frequency:</strong> Every 4 hours</p>
+// ── API helpers ──
+async function api(method, path, body) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    return r.json();
+}
 
-        <button type="submit">
-            Save Scheduler
-        </button>
+// ── Load data ──
+async function loadJobs() {
+    try {
+        allJobs = await api('GET', '/api/jobs');
+    } catch { allJobs = []; }
+    renderJobs();
+}
 
-    </form>
+async function loadHistory() {
+    try {
+        allHistory = await api('GET', '/api/history?limit=30');
+    } catch { allHistory = []; }
+    renderHistory();
+}
 
-    <hr>
+// ── Render jobs ──
+function renderJobs() {
+    const active = allJobs.filter(j => ['pending','running','paused'].includes(j.status));
+    const past   = allJobs.filter(j => ['completed','failed','cancelled'].includes(j.status));
 
-    <h3>Current Configuration</h3>
+    const activeEl = document.getElementById('active-jobs');
+    const pastEl   = document.getElementById('past-jobs');
+    const pastSec  = document.getElementById('past-section');
 
-    <ul>
-        <li><strong>Country:</strong> {{ config.country }}</li>
-        <li><strong>Category:</strong> {{ config.category_name }}</li>
-        <li><strong>Category ID:</strong> {{ config.category_id }}</li>
-        <li><strong>Topic Category:</strong> {{ config.topic_category }}</li>
-        <li><strong>Run Every:</strong> {{ config.schedule_every_hours }} hours</li>
-    </ul>
+    // Active
+    if (active.length === 0) {
+        activeEl.innerHTML = '<div class="empty">No active jobs — click <strong>Create Job</strong> to get started.</div>';
+    } else {
+        activeEl.innerHTML = active.map(j => jobCardHTML(j)).join('');
+    }
 
-    <hr>
+    // Past
+    if (past.length === 0) {
+        pastEl.innerHTML = '';
+        pastSec.style.display = 'none';
+    } else {
+        pastSec.style.display = '';
+        pastEl.innerHTML = past.map(j => jobCardHTML(j)).join('');
+    }
+}
 
-    <h3>Last Run Status</h3>
+function jobCardHTML(j) {
+    const isAlarm = j.job_type === 'alarm';
+    const typeLabel = isAlarm ? 'One Time' : 'Recurring';
+    const typeCls   = isAlarm ? 'type-alarm' : 'type-interval';
 
-    <ul>
-        <li><strong>Last Triggered At:</strong> {{ status.last_triggered_at or 'N/A' }}</li>
-        <li><strong>Main Status:</strong> {{ status.last_main_status }}</li>
-        <li><strong>Main Completed At:</strong> {{ status.last_main_at or 'N/A' }}</li>
-        <li><strong>Main Run ID:</strong> {{ status.last_main_run_id or 'N/A' }}</li>
-        <li><strong>API Status:</strong> {{ status.last_api_status }}</li>
-        <li><strong>API Completed At:</strong> {{ status.last_api_at or 'N/A' }}</li>
-        <li><strong>API HTML:</strong> {{ status.last_api_html or 'N/A' }}</li>
-        <li><strong>Last Error:</strong> {{ status.last_error or 'None' }}</li>
-    </ul>
+    // Schedule text
+    let schedText = '';
+    if (j.status === 'running') schedText = 'Running now…';
+    else if (j.status === 'paused') schedText = 'Paused';
+    else if (isAlarm) schedText = j.run_at ? fmtDT(j.run_at) : 'Not set';
+    else schedText = `Every ${j.interval_hours || 4}h`;
+
+    // Countdown (only for pending jobs with next_run_at)
+    let cdHTML = '';
+    if (j.status === 'pending' && j.next_run_at) {
+        cdHTML = `<span class="countdown" data-target="${j.next_run_at}"></span>`;
+    }
+
+    // Error
+    let errHTML = '';
+    if (j.error_message) {
+        errHTML = `<div style="font-size:0.78rem;color:var(--danger);margin-top:0.35rem">${esc(j.error_message)}</div>`;
+    }
+
+    // Actions
+    let actions = '';
+    if (j.status === 'pending' || j.status === 'paused') {
+        actions += `<button class="btn-sm btn-run-sm" onclick="runNow(${j.id})">Run Now</button>`;
+    }
+    if (j.status === 'pending' || j.status === 'failed') {
+        actions += `<button class="btn-sm btn-pause-sm" onclick="pauseJob(${j.id})">Pause</button>`;
+    }
+    if (j.status === 'paused') {
+        actions += `<button class="btn-sm btn-resume-sm" onclick="resumeJob(${j.id})">Resume</button>`;
+    }
+    if (['pending','paused','failed'].includes(j.status)) {
+        actions += `<button class="btn-sm btn-edit-sm" onclick="editJob(${j.id})">Edit</button>`;
+    }
+    if (j.status !== 'running') {
+        const delLabel = j.status === 'cancelled' ? 'Delete' : 'Cancel';
+        actions += `<button class="btn-sm btn-delete-sm" onclick="deleteJob(${j.id},'${j.status}')">${delLabel}</button>`;
+    }
+
+    return `
+    <div class="job-card" data-job-id="${j.id}">
+        <div class="job-header">
+            <span class="job-name">${esc(j.name)}</span>
+            <span class="badge badge-${j.status}">${j.status}</span>
+        </div>
+        <div class="job-meta">
+            <span class="meta-tag ${typeCls}">${typeLabel}</span>
+            <span class="meta-tag">${esc(j.country)}</span>
+            <span class="meta-tag ${j.category_name === 'All Categories' ? 'type-all' : ''}">${j.category_name === 'All Categories' ? 'All Categories (5)' : esc(j.category_name)}</span>
+            <span class="meta-tag">WP: ${esc((j.wordpress_status||'draft').charAt(0).toUpperCase() + (j.wordpress_status||'draft').slice(1))}</span>
+        </div>
+        <div class="schedule-row">
+            <span class="schedule-info">${schedText}</span>
+            ${cdHTML}
+        </div>
+        ${errHTML}
+        <div class="job-actions">${actions}</div>
+    </div>`;
+}
+
+// ── Render history ──
+function renderHistory() {
+    const tbody = document.getElementById('history-body');
+    if (allHistory.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No executions yet.</td></tr>';
+        return;
+    }
+
+    // Enrich with job names
+    const jobMap = {};
+    allJobs.forEach(j => jobMap[j.id] = j.name);
+
+    tbody.innerHTML = allHistory.map(h => {
+        const jName = jobMap[h.job_id] || `#${h.job_id}`;
+        const trig = h.trigger_type === 'manual' ? 'Manual' : 'Scheduler';
+        const pubSt = h.publish_status || 'pending';
+        return `<tr>
+            <td>${fmtDT(h.started_at)}</td>
+            <td>${esc(jName)}</td>
+            <td>${trig}</td>
+            <td><span class="badge badge-${h.status}">${h.status}</span></td>
+            <td><span class="badge badge-${pubSt}">${pubSt}</span></td>
+            <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${h.error_message?'var(--danger)':'var(--text-muted)'}">${esc(h.error_message||'—')}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ── Countdown tickers ──
+function tickCountdowns() {
+    document.querySelectorAll('.countdown[data-target]').forEach(el => {
+        const target = new Date(el.dataset.target);
+        const diff = target - new Date();
+        if (diff <= 0) {
+            el.textContent = 'Due now';
+            el.classList.add('overdue');
+        } else {
+            el.textContent = fmtCountdown(diff);
+            el.classList.remove('overdue');
+        }
+    });
+}
+
+// ── Actions ──
+async function runNow(id) {
+    if (!confirm('Run this job now? It will not affect the scheduled next run.')) return;
+    await api('POST', `/api/jobs/${id}/run`);
+    await loadJobs();
+    await loadHistory();
+    startFastPoll();
+}
+
+async function pauseJob(id) {
+    if (!confirm('Pause this job?')) return;
+    await api('POST', `/api/jobs/${id}/pause`);
+    await loadJobs();
+}
+
+async function resumeJob(id) {
+    await api('POST', `/api/jobs/${id}/resume`);
+    await loadJobs();
+}
+
+async function deleteJob(id, status) {
+    const label = status === 'cancelled' ? 'permanently delete' : 'cancel';
+    if (!confirm(`Are you sure you want to ${label} this job?`)) return;
+    const perm = status === 'cancelled' ? '?permanent=true' : '';
+    await api('DELETE', `/api/jobs/${id}${perm}`);
+    await loadJobs();
+    await loadHistory();
+}
+
+// ── Modal ──
+function openCreateModal() {
+    document.getElementById('modal-title').textContent = 'Create New Job';
+    document.getElementById('edit-job-id').value = '';
+    document.getElementById('f-name').value = '';
+    document.getElementById('f-type-interval').checked = true;
+    toggleTypeFields();
+    document.getElementById('f-run-at').value = '';
+    document.getElementById('f-interval').value = 4;
+    document.getElementById('f-country').value = 'US';
+    document.getElementById('f-category').value = 'All Categories';
+    document.getElementById('f-wp-status').value = 'draft';
+    hideError();
+    document.getElementById('modal-overlay').classList.add('open');
+}
+
+function editJob(id) {
+    const j = allJobs.find(x => x.id === id);
+    if (!j) return;
+    document.getElementById('modal-title').textContent = 'Edit Job';
+    document.getElementById('edit-job-id').value = id;
+    document.getElementById('f-name').value = j.name || '';
+    if (j.job_type === 'alarm') {
+        document.getElementById('f-type-alarm').checked = true;
+    } else {
+        document.getElementById('f-type-interval').checked = true;
+    }
+    toggleTypeFields();
+    // Format datetime for the input
+    if (j.run_at) {
+        document.getElementById('f-run-at').value = j.run_at.slice(0,16);
+    } else {
+        document.getElementById('f-run-at').value = '';
+    }
+    document.getElementById('f-interval').value = j.interval_hours || 4;
+    document.getElementById('f-country').value = j.country || 'US';
+    document.getElementById('f-category').value = j.category_name || 'All Categories';
+    document.getElementById('f-wp-status').value = j.wordpress_status || 'draft';
+    hideError();
+    document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+}
+
+function closeModalOutside(e) {
+    if (e.target === document.getElementById('modal-overlay')) closeModal();
+}
+
+function toggleTypeFields() {
+    const isAlarm = document.getElementById('f-type-alarm').checked;
+    document.getElementById('f-alarm-group').style.display = isAlarm ? '' : 'none';
+    document.getElementById('f-interval-group').style.display = isAlarm ? 'none' : '';
+}
+
+document.querySelectorAll('input[name="f-type"]').forEach(r => r.addEventListener('change', toggleTypeFields));
+
+function showError(msg) {
+    const el = document.getElementById('modal-error');
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+function hideError() {
+    document.getElementById('modal-error').style.display = 'none';
+}
+
+async function saveJob() {
+    hideError();
+    const id = document.getElementById('edit-job-id').value;
+    const isAlarm = document.getElementById('f-type-alarm').checked;
+    const body = {
+        name: document.getElementById('f-name').value.trim(),
+        job_type: isAlarm ? 'alarm' : 'interval',
+        run_at: isAlarm ? document.getElementById('f-run-at').value : null,
+        interval_hours: parseInt(document.getElementById('f-interval').value) || 4,
+        country: document.getElementById('f-country').value,
+        category_name: document.getElementById('f-category').value,
+        wordpress_status: document.getElementById('f-wp-status').value,
+    };
+
+    if (!body.name) { showError('Job name is required.'); return; }
+    if (isAlarm && !body.run_at) { showError('Please set a date and time for the alarm.'); return; }
+
+    try {
+        if (id) {
+            const res = await api('PUT', `/api/jobs/${id}`, body);
+            if (res.error) { showError(res.error); return; }
+        } else {
+            const res = await api('POST', '/api/jobs', body);
+            if (res.error) { showError(res.error); return; }
+        }
+        closeModal();
+        await loadJobs();
+    } catch (e) {
+        showError('Request failed: ' + e.message);
+    }
+}
+
+// ── Fast poll after manual run ──
+let fastPollCount = 0;
+let fastPollTimer = null;
+function startFastPoll() {
+    if (fastPollTimer) clearInterval(fastPollTimer);
+    fastPollCount = 0;
+    fastPollTimer = setInterval(() => {
+        loadJobs();
+        loadHistory();
+        fastPollCount++;
+        if (fastPollCount >= 24) { clearInterval(fastPollTimer); fastPollTimer = null; }
+    }, 5000);
+}
+
+// ── Utilities ──
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+}
+
+function fmtDT(iso) {
+    if (!iso) return '—';
+    try {
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true
+        });
+    } catch { return iso; }
+}
+
+function fmtCountdown(ms) {
+    const s = Math.floor(ms / 1000);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${sec}s`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+}
+
+// ── Init ──
+loadJobs();
+loadHistory();
+
+// Countdown ticker every second
+setInterval(tickCountdowns, 1000);
+
+// Background poll every 10 seconds
+setInterval(() => { loadJobs(); loadHistory(); }, 10000);
+</script>
 
 </body>
-
 </html>
-------------------------------------------------------
+--------------------------------------------------------------------------------
 
-app/config.json
 
+
+-------------------------------------app/b2_diagnostic.py-------------------------------------------
+#!/usr/bin/env python3
+"""
+Standalone B2 connectivity diagnostic.
+
+Run this from your project root (the folder containing app/):
+
+    python -m app.b2_diagnostic
+
+or:
+
+    python app/b2_diagnostic.py
+
+It will:
+  1. Load .env from the project root
+  2. Print the env vars it found (with masked secrets)
+  3. Try to connect to B2
+  4. List buckets
+  5. Try to upload a small test file
+  6. Clean up the test file
+  7. Print a clear PASS/FAIL summary
+
+If anything fails, the actual error message is printed.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+
+def _mask(value: str) -> str:
+    """Mask a secret string, showing only first 4 and last 4 chars."""
+    if not value:
+        return "(empty)"
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}...{value[-4:]}  (length={len(value)})"
+
+
+def main() -> int:
+    print("=" * 60)
+    print("Backblaze B2 Connectivity Diagnostic")
+    print("=" * 60)
+
+    # ── Step 1: Load .env ──────────────────────────────────────────
+    print("\n[1/5] Loading .env file...")
+    project_root = Path(__file__).resolve().parent.parent
+    env_path = project_root / ".env"
+    print(f"  Project root: {project_root}")
+    print(f"  .env path:    {env_path}")
+    print(f"  .env exists:  {env_path.exists()}")
+
+    if env_path.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(env_path)
+            print("  .env loaded successfully via python-dotenv")
+        except ImportError:
+            print("  WARNING: python-dotenv not installed. Install with:")
+            print("    pip install python-dotenv")
+            print("  Falling back to shell env vars only.")
+    else:
+        print("  WARNING: .env not found. Relying on shell env vars only.")
+
+    # ── Step 2: Print env vars ─────────────────────────────────────
+    print("\n[2/5] Checking environment variables...")
+    endpoint = os.getenv("B2_ENDPOINT_URL", "")
+    access_key = os.getenv("B2_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("B2_SECRET_ACCESS_KEY", "")
+    region = os.getenv("B2_REGION", "")
+    bucket_name = os.getenv("B2_BUCKET_NAME", "trend-agent")
+
+    print(f"  B2_ENDPOINT_URL:       {endpoint or '(not set)'}")
+    print(f"  B2_ACCESS_KEY_ID:      {_mask(access_key)}")
+    print(f"  B2_SECRET_ACCESS_KEY:  {_mask(secret_key)}")
+    print(f"  B2_REGION:             {region or '(not set, will be derived)'}")
+    print(f"  B2_BUCKET_NAME:        {bucket_name}")
+
+    missing = []
+    if not endpoint:
+        missing.append("B2_ENDPOINT_URL")
+    if not access_key:
+        missing.append("B2_ACCESS_KEY_ID")
+    if not secret_key:
+        missing.append("B2_SECRET_ACCESS_KEY")
+
+    if missing:
+        print(f"\n  MISSING ENV VARS: {', '.join(missing)}")
+        print(f"  Add these to your .env at {env_path}")
+        return 1
+
+    # ── Step 3: Try to connect ─────────────────────────────────────
+    print("\n[3/5] Connecting to Backblaze B2...")
+    try:
+        # Add project root to sys.path so 'app' module is importable
+        sys.path.insert(0, str(project_root))
+        from app.b2_engine import B2Engine
+
+        engine = B2Engine.instance()
+        print(f"  Engine created: {engine._endpoint_url} (region={engine._region})")
+        print(f"  Target bucket:  {bucket_name}")
+    except Exception as exc:
+        print(f"  Failed to create engine: {exc}")
+        return 1
+
+    # ── Step 4: ping (with verbose error) ──────────────────────────
+    print("\n[4/5] Pinging B2 (list_buckets)...")
+    ok = engine.ping(verbose=True)
+    if not ok:
+        print("\n  ping() FAILED")
+        print("\n  Common causes:")
+        print("    a. Wrong credentials — re-check keyID and applicationKey from B2 dashboard")
+        print("       (Master Application Key will NOT work — create a regular application key)")
+        print("    b. System clock skew — B2 rejects requests if clock is off by > 5 min")
+        print("       Check with: date  (compare to world time)")
+        print("    c. Wrong endpoint URL — must match your bucket's region")
+        print("    d. Network firewall blocking outbound HTTPS to backblazeb2.com")
+        print("    e. Key without 'listBuckets' capability")
+        return 1
+
+    print("  ping() succeeded!")
+
+    # ── Step 5: List buckets + check configured bucket exists ──────
+    print("\n[5/5] Listing buckets...")
+    try:
+        buckets = engine.list_buckets()
+        print(f"  Found {len(buckets)} bucket(s):")
+        for name in buckets:
+            marker = " <-- configured" if name == bucket_name else ""
+            print(f"    - {name}{marker}")
+
+        if bucket_name not in buckets:
+            print(f"\n  Configured bucket '{bucket_name}' does NOT exist.")
+            print(f"  Creating it now via ensure_buckets()...")
+            try:
+                result = engine.ensure_buckets()
+                print(f"  Result: {result}")
+                if "error" in str(result.get(bucket_name, "")):
+                    print(f"  Failed to create bucket. Check B2 dashboard permissions.")
+                    return 1
+            except Exception as exc:
+                print(f"  Failed to create bucket: {exc}")
+                return 1
+    except Exception as exc:
+        print(f"  Failed to list buckets: {exc}")
+        return 1
+
+    # ── Bonus: try upload + delete a tiny test file ────────────────
+    print("\n[Bonus] Testing upload + delete cycle...")
+    test_category = "blogs"
+    test_key = "_diagnostic_test.txt"
+    test_content = b"Hello from B2 diagnostic test."
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+            tmp.write(test_content)
+            tmp_path = tmp.name
+
+        # Show what the resolved key will look like
+        from app.b2_engine import _resolve_object_key
+        resolved_key = _resolve_object_key(test_category, test_key)
+        print(f"  Category:    {test_category!r}")
+        print(f"  Key:         {test_key!r}")
+        print(f"  Resolved:    bucket={bucket_name!r}, key={resolved_key!r}")
+        print(f"  Uploading {test_content!r}...")
+
+        info = engine.upload_file(test_category, tmp_path, key=test_key)
+        print(f"  Uploaded:")
+        print(f"    bucket:  {info['bucket']}")
+        print(f"    key:     {info['key']}")
+        print(f"    size:    {info['size']} bytes")
+        print(f"    url:     {info['url'][:80]}...")
+
+        print(f"  Deleting test object...")
+        deleted = engine.delete_object(test_category, test_key)
+        if deleted:
+            print(f"  Deleted test object")
+        else:
+            print(f"  WARNING: Could not delete test object (manual cleanup needed)")
+
+        Path(tmp_path).unlink(missing_ok=True)
+    except Exception as exc:
+        print(f"  Upload/delete test failed: {exc}")
+        print(f"  This usually means the bucket '{bucket_name}' doesn't exist")
+        print(f"  or the application key lacks writeFiles capability.")
+        return 1
+
+    # ── Summary ────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("ALL CHECKS PASSED — B2 is fully operational!")
+    print(f"  Bucket:  {bucket_name}")
+    print(f"  Region:  {region or '(derived from endpoint)'}")
+    print(f"  Design:  single bucket + category prefixes")
+    print(f"           (blogs/, images/, cache/, memory/, trends/, archives/)")
+    print("=" * 60)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+------------------------------------app/b2_engine.py--------------------------------------------
+"""
+Backblaze B2 Engine for the Trend Agent Scheduler.
+
+A self-contained, reusable engine that handles:
+
+  1. **Connection lifecycle** — lazy singleton via ``B2Engine.instance()``.
+     Reads B2 credentials from environment variables (or accepts them
+     as parameters).  Uses the S3-compatible API via ``boto3``, so
+     Backblaze B2 works exactly like AWS S3.
+
+  2. **Auto-creation** — ``engine.ensure_buckets()`` creates the
+     configured bucket if it doesn't already exist.  Idempotent.
+
+  3. **Upload / Download / Delete** — high-level helpers that work
+     with local file paths and return presigned URLs for remote
+     access.  Content types are auto-detected from extensions.
+
+  4. **Health check** — ``engine.ping()`` verifies connectivity.
+
+  5. **Category-based organization** — instead of multiple buckets,
+     the engine uses ONE configurable bucket + key prefixes per
+     category (blogs/, images/, cache/, memory/, trends/, archives/).
+     This is cheaper (fewer B2 transactions, less bucket-management
+     overhead) and easier to manage than 6 separate buckets.
+
+Why a single bucket with prefixes?
+  - B2 charges per-transaction fees — fewer buckets = fewer ops.
+  - Free tier allows limited buckets (100 max) — don't waste them.
+  - All files share the same bucket policy, CORS, lifecycle rules.
+  - Same logical separation via prefixes (blogs/, images/, etc.).
+  - The public API still accepts "category" names like "blogs",
+    "trend-blogs", "images" — they all map to a prefix within the
+    single bucket.
+
+Why Backblaze B2 instead of MinIO?
+  - B2 is cloud-hosted → survives CI/CD container recreation.
+  - S3-compatible API → uses standard boto3 library.
+  - Cheap: first 10 GB storage free, egress is free.
+  - No server to manage, no Docker sidecar, no license.
+
+Environment variables (from .env)::
+
+    B2_ENDPOINT_URL=https://s3.us-west-002.backblazeb2.com
+    B2_ACCESS_KEY_ID=your-key-id
+    B2_SECRET_ACCESS_KEY=your-secret-key
+    B2_REGION=us-west-002                    ← optional, derived from endpoint
+    B2_BUCKET_NAME=trend-agent               ← optional, default "trend-agent"
+
+Usage::
+
+    from app.b2_engine import B2Engine
+
+    engine = B2Engine.instance()
+    engine.ensure_buckets()
+
+    # Upload a file (category is "blogs" → key prefix "blogs/")
+    info = engine.upload_file("blogs", "storage/blogs/article.html")
+
+    # Upload with a specific object key (will be prefixed: "blogs/runs/49d15026/article.html")
+    info = engine.upload_file("blogs", "storage/blogs/article.html",
+                              key="runs/49d15026/article.html")
+
+    # Download (same category + key)
+    path = engine.download_file("blogs", "runs/49d15026/article.html",
+                                dest="/tmp/article.html")
+
+    # Get a presigned URL (no download needed)
+    url = engine.presigned_url("blogs", "runs/49d15026/article.html")
+
+    # Check if object exists
+    exists = engine.object_exists("blogs", "runs/49d15026/article.html")
+
+Backward compatibility:
+    The old bucket names ("trend-blogs", "trend-images", "trend-cache",
+    "trend-memory", "trend-trends", "trend-archives") are also accepted
+    as category arguments and map to the same prefixes.  This means
+    existing callers don't need to change their code.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Optional
+
+import boto3
+from botocore.exceptions import ClientError
+
+
+# ── Bucket configuration ──────────────────────────────────────────────────
+# Single configurable bucket, organized by key prefixes per category.
+# Cheaper than 6 buckets, same organization, fewer B2 transactions.
+
+DEFAULT_BUCKET_NAME = "trend-agent"
+
+# Category → key prefix mapping.
+# The "category" parameter on upload/download/list/etc. methods is looked
+# up here to determine the key prefix within the single bucket.
+# Both short ("blogs") and legacy ("trend-blogs") names are supported.
+CATEGORY_PREFIXES: dict[str, str] = {
+    # Short names (preferred)
+    "blogs":    "blogs/",
+    "images":   "images/",
+    "cache":    "cache/",
+    "memory":   "memory/",
+    "trends":   "trends/",
+    "archives": "archives/",
+    # Legacy multi-bucket names (backward compat — same prefixes)
+    "trend-blogs":    "blogs/",
+    "trend-images":   "images/",
+    "trend-cache":    "cache/",
+    "trend-memory":   "memory/",
+    "trend-trends":   "trends/",
+    "trend-archives": "archives/",
+}
+
+
+# ── Content type mapping ─────────────────────────────────────────────────
+
+_CONTENT_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".htm":  "text/html; charset=utf-8",
+    ".md":   "text/markdown; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".jsonl": "application/x-ndjson; charset=utf-8",
+    ".txt":  "text/plain; charset=utf-8",
+    ".xml":  "application/xml; charset=utf-8",
+    ".csv":  "text/csv; charset=utf-8",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+    ".svg":  "image/svg+xml",
+    ".pdf":  "application/pdf",
+    ".zip":  "application/zip",
+}
+
+
+def _content_type(path: str | Path) -> str:
+    """Return the Content-Type for a file based on its extension."""
+    suffix = Path(path).suffix.lower()
+    return _CONTENT_TYPES.get(suffix, "application/octet-stream")
+
+
+def _bucket_name() -> str:
+    """Return the single configured B2 bucket name (from env or default)."""
+    name = os.getenv("B2_BUCKET_NAME", DEFAULT_BUCKET_NAME).strip()
+    return name or DEFAULT_BUCKET_NAME
+
+
+def _resolve_category_prefix(category: str) -> str:
+    """
+    Return the key prefix for a given category.
+
+    Examples:
+        "blogs"         → "blogs/"
+        "trend-blogs"   → "blogs/"  (legacy name)
+        "images"        → "images/"
+        "custom-thing"  → "custom-thing/"  (default: use name as prefix)
+    """
+    if not category:
+        return ""
+    if category in CATEGORY_PREFIXES:
+        return CATEGORY_PREFIXES[category]
+    # Default: use the category name itself as the prefix
+    return f"{category.strip('/')}/"
+
+
+def _resolve_object_key(category: str, key: str | None) -> str:
+    """
+    Combine the category prefix with the object key.
+
+    If the key already starts with the prefix, it's returned unchanged
+    (idempotent).  If key is empty, only the prefix is returned.
+
+    Examples:
+        ("blogs", "runs/abc/article.html") → "blogs/runs/abc/article.html"
+        ("blogs", "blogs/runs/abc/x.html")  → "blogs/runs/abc/x.html"  (already prefixed)
+        ("blogs", None)                     → "blogs/"
+        ("blogs", "")                       → "blogs/"
+    """
+    prefix = _resolve_category_prefix(category)
+    if not key:
+        return prefix.rstrip("/")
+    if prefix and key.startswith(prefix):
+        return key
+    return f"{prefix}{key}"
+
+
+class B2Engine:
+    """
+    Lightweight Backblaze B2 engine using boto3 (S3-compatible API).
+
+    Provides connection management, auto-creation, and file operation
+    helpers.  Use ``B2Engine.instance()`` to get the singleton, or
+    construct directly for testing.
+
+    All file operations take a ``category`` argument (e.g. "blogs",
+    "images", "cache") which determines the key prefix within the
+    single configured bucket.  This is transparent to callers —
+    they just pass a category name and the engine handles the rest.
+    """
+
+    _instance: Optional[B2Engine] = None
+
+    # ── Singleton ─────────────────────────────────────────────────────
+
+    @classmethod
+    def instance(
+        cls,
+        endpoint_url: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        region: str | None = None,
+    ) -> B2Engine:
+        """
+        Return the global singleton engine.
+
+        On the very first call the engine is created with the given
+        parameters (or environment variables).  Subsequent calls ignore
+        the parameters and return the existing instance.
+        """
+        if cls._instance is None:
+            cls._instance = cls(
+                endpoint_url=endpoint_url,
+                access_key_id=access_key_id,
+                secret_access_key=secret_access_key,
+                region=region,
+            )
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton (useful for tests)."""
+        if cls._instance is not None:
+            cls._instance.close()
+            cls._instance = None
+
+    # ── Constructor ───────────────────────────────────────────────────
+
+    def __init__(
+        self,
+        endpoint_url: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        region: str | None = None,
+    ) -> None:
+        self._endpoint_url = endpoint_url or os.getenv("B2_ENDPOINT_URL", "")
+        if not self._endpoint_url:
+            raise ValueError(
+                "Backblaze B2 endpoint not configured.  Set B2_ENDPOINT_URL in .env "
+                "or pass endpoint_url to B2Engine()."
+            )
+
+        # Ensure URL has scheme
+        if not self._endpoint_url.startswith("http"):
+            self._endpoint_url = f"https://{self._endpoint_url}"
+
+        self._access_key_id = access_key_id or os.getenv("B2_ACCESS_KEY_ID", "")
+        self._secret_access_key = secret_access_key or os.getenv("B2_SECRET_ACCESS_KEY", "")
+
+        if not self._access_key_id or not self._secret_access_key:
+            raise ValueError(
+                "Backblaze B2 credentials not configured.  Set B2_ACCESS_KEY_ID and "
+                "B2_SECRET_ACCESS_KEY in .env or pass them to B2Engine()."
+            )
+
+        # Derive region from endpoint if not provided
+        # e.g. https://s3.us-west-002.backblazeb2.com → us-west-002
+        if region:
+            self._region = region
+        elif os.getenv("B2_REGION", "").strip():
+            self._region = os.getenv("B2_REGION").strip()
+        else:
+            self._region = self._extract_region(self._endpoint_url)
+
+        # Bucket name is read fresh from env each time via _bucket_name(),
+        # but we cache it here for diagnostics / introspection.
+        self._bucket_name = _bucket_name()
+
+        self._s3_client = None
+        self._s3_resource = None
+        self._initialized = False  # True after ensure_buckets() succeeds
+
+    @staticmethod
+    def _extract_region(endpoint_url: str) -> str:
+        """Extract region from B2 endpoint URL."""
+        # https://s3.us-west-002.backblazeb2.com → us-west-002
+        import re
+        m = re.search(r's3[.]([a-z0-9-]+)[.]backblazeb2', endpoint_url)
+        if m:
+            return m.group(1)
+        return "us-west-002"  # Default
+
+    # ── Connection ────────────────────────────────────────────────────
+
+    @property
+    def client(self):
+        """Lazily create and return the boto3 S3 client."""
+        if self._s3_client is None:
+            self._s3_client = boto3.client(
+                "s3",
+                endpoint_url=self._endpoint_url,
+                aws_access_key_id=self._access_key_id,
+                aws_secret_access_key=self._secret_access_key,
+                region_name=self._region,
+            )
+        return self._s3_client
+
+    @property
+    def resource(self):
+        """Lazily create and return the boto3 S3 resource."""
+        if self._s3_resource is None:
+            self._s3_resource = boto3.resource(
+                "s3",
+                endpoint_url=self._endpoint_url,
+                aws_access_key_id=self._access_key_id,
+                aws_secret_access_key=self._secret_access_key,
+                region_name=self._region,
+            )
+        return self._s3_resource
+
+    def close(self) -> None:
+        """Close the underlying client (idempotent)."""
+        self._s3_client = None
+        self._s3_resource = None
+
+    # ── Health check ────────────────────────────────────────────────
+
+    def ping(self, verbose: bool = False) -> bool:
+        """
+        Verify connectivity to the Backblaze B2 service.
+
+        Args:
+            verbose: If True, print the actual exception on failure so
+                     the operator can see WHY the call failed (auth,
+                     clock skew, network, region mismatch, etc.).
+
+        Returns True on success, False on failure.  Does not raise.
+        """
+        try:
+            self.client.list_buckets()
+            return True
+        except Exception as exc:
+            if verbose:
+                print(f"[B2Engine] ping() failed:")
+                print(f"  Exception type: {type(exc).__name__}")
+                print(f"  Exception msg:  {exc}")
+                # Print boto3-specific error details if available
+                if hasattr(exc, 'response'):
+                    resp = exc.response
+                    print(f"  HTTP status:    {resp.get('ResponseMetadata', {}).get('HTTPStatusCode', '?')}")
+                    print(f"  Error code:     {resp.get('Error', {}).get('Code', '?')}")
+                    print(f"  Error message:  {resp.get('Error', {}).get('Message', '?')}")
+                self.print_config()
+            return False
+
+    def print_config(self) -> None:
+        """Print the current B2 configuration (with masked credentials) for debugging."""
+        masked_key = self._access_key_id[:4] + "..." + self._access_key_id[-4:] if len(self._access_key_id) > 8 else "***"
+        masked_secret = self._secret_access_key[:4] + "..." + self._secret_access_key[-4:] if len(self._secret_access_key) > 8 else "***"
+        print(f"  Endpoint:       {self._endpoint_url}")
+        print(f"  Region:         {self._region}")
+        print(f"  Bucket:         {self._bucket_name}")
+        print(f"  Access Key ID:  {masked_key}  (length={len(self._access_key_id)})")
+        print(f"  Secret Key:     {masked_secret}  (length={len(self._secret_access_key)})")
+
+    def get_server_info(self) -> dict[str, str]:
+        """Return basic server info dict.  Raises on failure."""
+        resp = self.client.list_buckets()
+        buckets = [b["Name"] for b in resp.get("Buckets", [])]
+        return {
+            "endpoint_url": self._endpoint_url,
+            "region": self._region,
+            "bucket_name": self._bucket_name,
+            "bucket_count": str(len(buckets)),
+            "buckets": ", ".join(buckets[:10]),
+        }
+
+    # ── Auto-creation ─────────────────────────────────────────────────
+
+    def ensure_buckets(self, _categories: list[str] | None = None) -> dict[str, str]:
+        """
+        Ensure the configured B2 bucket exists.  Idempotent.
+
+        The ``_categories`` argument is accepted for backward compatibility
+        but ignored — in the new single-bucket design, only the configured
+        bucket (B2_BUCKET_NAME) needs to exist.
+
+        Returns:
+            Dict with one entry: {bucket_name: "created" | "exists" | "error: ..."}
+        """
+        bucket = _bucket_name()
+        try:
+            existing = {b["Name"] for b in self.client.list_buckets().get("Buckets", [])}
+        except Exception as exc:
+            return {bucket: f"error: {exc}"}
+
+        if bucket in existing:
+            self._initialized = True
+            return {bucket: "exists"}
+
+        try:
+            self.client.create_bucket(Bucket=bucket)
+            self._initialized = True
+            return {bucket: "created"}
+        except ClientError as exc:
+            err_code = exc.response.get("Error", {}).get("Code", "")
+            if err_code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                self._initialized = True
+                return {bucket: "exists"}
+            print(f"B2Engine: failed to create bucket '{bucket}': {exc}")
+            return {bucket: f"error: {exc}"}
+
+    def register_bucket(self, name: str) -> None:
+        """
+        No-op in the new single-bucket design.
+
+        Kept for backward compatibility — older code may call this.
+        Category prefixes are now fixed in ``CATEGORY_PREFIXES``.
+        """
+        return  # no-op
+
+    # ── Upload ────────────────────────────────────────────────────────
+
+    def upload_file(
+        self,
+        bucket: str,
+        file_path: str | Path,
+        key: str | None = None,
+        content_type: str | None = None,
+    ) -> dict:
+        """
+        Upload a local file to the configured B2 bucket, organized under
+        a category-based key prefix.
+
+        Args:
+            bucket:       Logical category name.  Determines the key
+                          prefix within the single bucket.
+                          Examples: "blogs", "images", "cache",
+                          or legacy "trend-blogs", "trend-images".
+            file_path:    Local filesystem path to the file.
+            key:          Object key WITHIN the category prefix.
+                          Defaults to the filename portion of *file_path*.
+                          The prefix is prepended automatically.
+            content_type: MIME type.  Auto-detected from extension if
+                          not provided.
+
+        Returns:
+            Dict with bucket, category, key (prefixed), size,
+            content_type, and presigned URL.
+        """
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key or path.name)
+        ct = content_type or _content_type(path)
+        size = path.stat().st_size
+
+        self.client.upload_file(
+            Filename=str(path),
+            Bucket=actual_bucket,
+            Key=object_key,
+            ExtraArgs={"ContentType": ct},
+        )
+
+        url = self.presigned_url(actual_bucket, object_key)
+
+        return {
+            "bucket": actual_bucket,
+            "category": bucket,
+            "key": object_key,
+            "size": size,
+            "content_type": ct,
+            "url": url,
+        }
+
+    def upload_bytes(
+        self,
+        bucket: str,
+        key: str,
+        data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict:
+        """
+        Upload raw bytes to the configured bucket, organized under
+        a category-based key prefix.
+
+        Args:
+            bucket: Logical category (e.g. "blogs", "images").
+            key:    Object key WITHIN the category prefix.
+                    The prefix is prepended automatically.
+            data:   Raw bytes to upload.
+            content_type: MIME type.
+
+        Returns:
+            Dict with bucket, category, key (prefixed), size,
+            content_type, and presigned URL.
+        """
+        import io
+
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key)
+        size = len(data)
+        stream = io.BytesIO(data)
+
+        self.client.upload_fileobj(
+            Fileobj=stream,
+            Bucket=actual_bucket,
+            Key=object_key,
+            ExtraArgs={"ContentType": content_type},
+        )
+
+        url = self.presigned_url(actual_bucket, object_key)
+
+        return {
+            "bucket": actual_bucket,
+            "category": bucket,
+            "key": object_key,
+            "size": size,
+            "content_type": content_type,
+            "url": url,
+        }
+
+    # ── Download ──────────────────────────────────────────────────────
+
+    def download_file(
+        self,
+        bucket: str,
+        key: str,
+        dest: str | Path | None = None,
+    ) -> Path:
+        """
+        Download an object from the configured bucket.
+
+        Args:
+            bucket: Logical category (e.g. "blogs").  Used to resolve
+                    the key prefix if *key* doesn't already include it.
+            key:    Object key.  If it doesn't start with the category
+                    prefix, the prefix is prepended automatically.
+            dest:   Local destination path.  Defaults to the object
+                    key's filename in the current working directory.
+
+        Returns:
+            Path to the downloaded file.
+        """
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key)
+
+        if dest is None:
+            dest = Path(key).name
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        self.client.download_file(
+            Bucket=actual_bucket,
+            Key=object_key,
+            Filename=str(dest),
+        )
+        return dest
+
+    def download_bytes(self, bucket: str, key: str) -> bytes:
+        """
+        Download an object as raw bytes.
+
+        Args:
+            bucket: Logical category (e.g. "blogs").  Used to resolve
+                    the key prefix if *key* doesn't already include it.
+            key:    Object key.  Prefix is prepended if not present.
+
+        Returns:
+            The object content as bytes.
+        """
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key)
+
+        response = self.client.get_object(
+            Bucket=actual_bucket,
+            Key=object_key,
+        )
+        return response["Body"].read()
+
+    # ── Presigned URLs ────────────────────────────────────────────────
+
+    def presigned_url(
+        self,
+        bucket: str,
+        key: str,
+        expires: int = 7 * 24 * 3600,
+    ) -> str:
+        """
+        Generate a presigned GET URL for an object.
+
+        Args:
+            bucket: Either the actual bucket name (in which case *key*
+                    is used as-is) OR a category name (in which case
+                    the prefix is prepended to *key*).
+            key:    Object key.
+            expires: URL expiry in seconds (default: 7 days).
+
+        Returns:
+            Presigned URL string, or "" on error.
+        """
+        # If caller passed the actual configured bucket name, treat key as-is
+        if bucket == _bucket_name():
+            actual_bucket = bucket
+            actual_key = key
+        else:
+            # Treat bucket as a category and resolve prefix
+            actual_bucket = _bucket_name()
+            actual_key = _resolve_object_key(bucket, key)
+
+        try:
+            url = self.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": actual_bucket, "Key": actual_key},
+                ExpiresIn=expires,
+            )
+            return url
+        except Exception:
+            return ""
+
+    # ── Object info ───────────────────────────────────────────────────
+
+    def object_exists(self, bucket: str, key: str) -> bool:
+        """
+        Check if an object exists in the configured bucket.
+
+        Args:
+            bucket: Logical category (prefix is auto-prepended if needed).
+            key:    Object key.
+        """
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key)
+        try:
+            self.client.head_object(Bucket=actual_bucket, Key=object_key)
+            return True
+        except ClientError as exc:
+            err_code = exc.response.get("Error", {}).get("Code", "")
+            if err_code in ("404", "NoSuchKey"):
+                return False
+            raise
+
+    def stat_object(self, bucket: str, key: str) -> dict:
+        """
+        Get metadata for an object.
+
+        Args:
+            bucket: Logical category (prefix is auto-prepended if needed).
+            key:    Object key.
+
+        Returns dict with bucket, category, key, size, content_type,
+        etag, last_modified, and presigned URL.
+        """
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key)
+        resp = self.client.head_object(Bucket=actual_bucket, Key=object_key)
+
+        return {
+            "bucket": actual_bucket,
+            "category": bucket,
+            "key": object_key,
+            "size": resp.get("ContentLength", 0),
+            "content_type": resp.get("ContentType", ""),
+            "etag": resp.get("ETag", "").strip('"'),
+            "last_modified": resp.get("LastModified").isoformat() if resp.get("LastModified") else None,
+            "url": self.presigned_url(actual_bucket, object_key),
+        }
+
+    # ── Delete ────────────────────────────────────────────────────────
+
+    def delete_object(self, bucket: str, key: str) -> bool:
+        """
+        Delete a single object.  Returns True if deleted.
+
+        Args:
+            bucket: Logical category (prefix is auto-prepended if needed).
+            key:    Object key.
+        """
+        actual_bucket = _bucket_name()
+        object_key = _resolve_object_key(bucket, key)
+        try:
+            self.client.delete_object(Bucket=actual_bucket, Key=object_key)
+            return True
+        except ClientError:
+            return False
+
+    def delete_objects(self, bucket: str, prefix: str) -> int:
+        """
+        Delete all objects under a category + prefix.
+
+        Args:
+            bucket: Logical category (e.g. "blogs").
+            prefix: Sub-prefix within the category (e.g. "runs/abc/").
+                    The category prefix is prepended automatically.
+
+        Returns:
+            Count of deleted objects.
+        """
+        actual_bucket = _bucket_name()
+        full_prefix = _resolve_object_key(bucket, prefix)
+        count = 0
+
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=actual_bucket, Prefix=full_prefix):
+            for obj in page.get("Contents", []):
+                try:
+                    self.client.delete_object(
+                        Bucket=actual_bucket,
+                        Key=obj["Key"],
+                    )
+                    count += 1
+                except ClientError:
+                    pass
+
+        return count
+
+    # ── List ──────────────────────────────────────────────────────────
+
+    def list_objects(
+        self,
+        bucket: str,
+        prefix: str = "",
+        recursive: bool = True,
+    ) -> list[dict]:
+        """
+        List objects in the configured bucket under a category.
+
+        Args:
+            bucket: Logical category (e.g. "blogs").  Used as the
+                    top-level prefix for listing.
+            prefix: Additional sub-prefix within the category.
+                    (e.g. "runs/abc/" to list files for run abc).
+            recursive: If True, list all matching objects recursively.
+
+        Returns:
+            List of dicts with key (prefixed), size, last_modified.
+        """
+        actual_bucket = _bucket_name()
+        full_prefix = _resolve_object_key(bucket, prefix)
+        result = []
+
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=actual_bucket, Prefix=full_prefix):
+            for obj in page.get("Contents", []):
+                result.append({
+                    "key": obj["Key"],
+                    "size": obj.get("Size", 0),
+                    "last_modified": obj.get("LastModified").isoformat() if obj.get("LastModified") else None,
+                })
+
+        return result
+
+    # ── Convenience ───────────────────────────────────────────────────
+
+    @property
+    def is_initialized(self) -> bool:
+        """True if ``ensure_buckets()`` has been called successfully."""
+        return self._initialized
+
+    def list_buckets(self) -> list[str]:
+        """Return the names of all existing buckets in the B2 account."""
+        resp = self.client.list_buckets()
+        return [b["Name"] for b in resp.get("Buckets", [])]
+
+    @property
+    def bucket_name(self) -> str:
+        """The configured bucket name (read from B2_BUCKET_NAME env var)."""
+        return _bucket_name()
+--------------------------------------------------------------------------------
+
+
+
+
+
+--------------------------------------app/cloud_sync.py------------------------------------------
+"""
+Cloud Sync — bridges local filesystem to Backblaze B2 + MongoDB.
+
+After ``news_agent`` writes files locally (storage/blogs, storage/cache,
+storage/images, etc.), this module:
+
+  1. Uploads the files to Backblaze B2 buckets.
+  2. Saves metadata in MongoDB (blog_metadata, run_cache, etc.).
+  3. Returns presigned URLs and object keys for downstream consumers.
+
+Design principle: **local-first with cloud backup**.
+
+  - During the same container lifecycle, local files are fast.
+  - After a deploy wipes the container, MongoDB metadata tells us
+    where to find files in Backblaze B2.
+  - Consumers (like publish_local_html.py) try local first, then
+    fall back to B2 via presigned URL.
+
+This module is the ONLY place that touches both B2 and MongoDB
+for file sync.  It keeps the rest of the app decoupled.
+
+Why B2 instead of MinIO:
+  - B2 is cloud-hosted → survives CI/CD container recreation.
+  - No server to manage → no Docker sidecar.
+  - S3-compatible API → standard boto3 library.
+  - Cheap: first 10 GB free, free egress.
+
+Usage::
+
+    from app.cloud_sync import CloudSync
+
+    sync = CloudSync.instance()
+
+    # After news_agent finishes a run:
+    result = sync.sync_run(run_id="49d15026-...")
+
+    # Lookup a previous run's files:
+    meta = sync.get_blog_metadata(run_id="49d15026-...")
+
+    # Fetch HTML content (local first, B2 fallback):
+    html = sync.get_html_content(run_id="49d15026-...")
+
+    # Scheduler status (replaces scheduler_status.json):
+    sync.save_scheduler_status({"last_triggered_at": "...", ...})
+    status = sync.load_scheduler_status()
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+# ── Load .env if python-dotenv is available ─────────────────────────────
+# This makes env vars from .env available to os.getenv() calls.
+# If python-dotenv is not installed, falls back to shell env vars only.
+try:
+    from dotenv import load_dotenv
+    # Look for .env in the project root (parent of app/)
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass  # python-dotenv not installed — rely on shell env vars
+
+from app.mongo_engine import MongoEngine
+
+
+# ── Category mapping ──────────────────────────────────────────────────────
+# Logical category names → key prefixes within the single configured B2 bucket.
+# The B2Engine takes a "category" argument and resolves it to a prefix
+# (e.g. "blogs" → "blogs/", "trend-blogs" → "blogs/").  Both short and
+# legacy names are supported.  All uploads go to the same bucket, organized
+# by prefix.  See b2_engine.py for details.
+
+CATEGORIES = ["blogs", "images", "cache", "memory", "trends", "archives"]
+
+
+# ── Project roots ────────────────────────────────────────────────────────
+
+def _project_root() -> Path:
+    """Return the project root (parent of app/)."""
+    return Path(__file__).resolve().parent.parent
+
+
+class CloudSync:
+    """
+    Orchestrates local → Backblaze B2 upload + MongoDB metadata save.
+
+    Uses the singleton pattern so the engines are initialized once.
+    """
+
+    _instance: Optional[CloudSync] = None
+
+    # ── Singleton ─────────────────────────────────────────────────────
+
+    @classmethod
+    def instance(cls) -> CloudSync:
+        """Return the global singleton."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton (useful for tests)."""
+        cls._instance = None
+
+    # ── Constructor ───────────────────────────────────────────────────
+
+    def __init__(self) -> None:
+        self._mongo = MongoEngine.instance()
+        self._b2 = None  # Lazy — B2 might not be configured yet
+        self._root = _project_root()
+        self._cloud_enabled: Optional[bool] = None
+
+    # ── Cloud availability check ──────────────────────────────────────
+
+    @property
+    def cloud_enabled(self) -> bool:
+        """
+        True if Backblaze B2 is configured and reachable.
+
+        If B2 is not configured (missing env vars), cloud sync
+        is disabled and the app falls back to local-only mode.
+        Diagnostic messages are printed so the operator knows why.
+        """
+        if self._cloud_enabled is None:
+            try:
+                from app.b2_engine import B2Engine
+                engine = B2Engine.instance()
+                # Use verbose=True so we see the EXACT reason ping failed
+                self._cloud_enabled = engine.ping(verbose=True)
+                if self._cloud_enabled:
+                    print("[CloudSync] Backblaze B2 is connected and ready.")
+                    try:
+                        buckets = engine.list_buckets()
+                        print(f"[CloudSync] Visible buckets: {buckets}")
+                    except Exception as exc:
+                        print(f"[CloudSync] Could not list buckets: {exc}")
+                else:
+                    print("[CloudSync] WARNING: B2 ping() failed. Cloud uploads DISABLED.")
+            except ValueError as exc:
+                self._cloud_enabled = False
+                print(f"[CloudSync] WARNING: B2 not configured — {exc}.")
+                print(f"  Cloud uploads DISABLED.")
+                # Print which env vars are missing
+                missing = []
+                if not os.getenv("B2_ENDPOINT_URL"):
+                    missing.append("B2_ENDPOINT_URL")
+                if not os.getenv("B2_ACCESS_KEY_ID"):
+                    missing.append("B2_ACCESS_KEY_ID")
+                if not os.getenv("B2_SECRET_ACCESS_KEY"):
+                    missing.append("B2_SECRET_ACCESS_KEY")
+                if missing:
+                    print(f"  Missing env vars: {', '.join(missing)}")
+                    env_path = Path(__file__).resolve().parent.parent / ".env"
+                    print(f"  Expected .env at: {env_path}")
+                    print(f"  .env exists: {env_path.exists()}")
+            except Exception as exc:
+                self._cloud_enabled = False
+                print(f"[CloudSync] WARNING: B2 initialization error — {exc}.")
+                print(f"  Cloud uploads DISABLED.")
+        return self._cloud_enabled
+
+    def _get_b2(self):
+        """Lazily get the B2 engine (raises if not configured)."""
+        if self._b2 is None:
+            from app.b2_engine import B2Engine
+            self._b2 = B2Engine.instance()
+        return self._b2
+
+    # ── Find local files for a run ────────────────────────────────────
+
+    def _find_html_for_run(self, run_id: str) -> Path | None:
+        """Find the generated HTML file for a run_id in storage/blogs/."""
+        blogs_dir = self._root / "storage" / "blogs"
+        if not blogs_dir.exists():
+            return None
+        candidates = sorted(
+            blogs_dir.glob(f"*-{run_id}.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    def _find_md_for_run(self, run_id: str) -> Path | None:
+        """Find the generated Markdown file for a run_id in storage/blogs/."""
+        blogs_dir = self._root / "storage" / "blogs"
+        if not blogs_dir.exists():
+            return None
+        candidates = sorted(
+            blogs_dir.glob(f"*-{run_id}.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    def _find_images_for_run(self, run_id: str) -> list[Path]:
+        """Find generated images associated with a run."""
+        images_dir = self._root / "storage" / "images"
+        if not images_dir.exists():
+            return []
+        results = list(images_dir.glob(f"*{run_id}*"))
+        if not results:
+            import time
+            cutoff = time.time() - 600
+            results = [
+                p for p in images_dir.iterdir()
+                if p.is_file() and p.stat().st_mtime > cutoff
+            ]
+        return sorted(results, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def _find_cache_files(self, run_id: str) -> list[Path]:
+        """Find cache JSON files for a run_id."""
+        cache_dir = self._root / "storage" / "cache"
+        if not cache_dir.exists():
+            return []
+        return sorted(cache_dir.glob(f"*{run_id}*.json"))
+
+    # ── Upload helpers ────────────────────────────────────────────────
+
+    def _upload_if_exists(
+        self,
+        bucket: str,
+        local_path: Path | None,
+        key: str,
+    ) -> dict | None:
+        """Upload a file to B2 if it exists locally.  Returns upload info or None."""
+        if not local_path or not local_path.exists():
+            return None
+        if not self.cloud_enabled:
+            print(f"[CloudSync] Skipping B2 upload for {key} — cloud not enabled (local-only mode)")
+            return {
+                "bucket": bucket,
+                "key": key,
+                "local_path": str(local_path),
+                "url": None,  # No cloud — local only
+            }
+
+        b2 = self._get_b2()
+        info = b2.upload_file(bucket, str(local_path), key=key)
+        info["local_path"] = str(local_path)
+        print(f"[CloudSync] Uploaded {key} → {bucket} ({info.get('size', '?')} bytes)")
+        return info
+
+    def _upload_cache_file(self, local_path: Path, run_id: str) -> dict | None:
+        """Upload a single cache JSON file.  Returns upload info or None."""
+        if not local_path.exists():
+            return None
+
+        stem = local_path.name.split("-")[0]  # e.g. "research", "run", "publish"
+        key = f"{run_id}/{local_path.name}"
+
+        # Parse JSON content for MongoDB storage
+        try:
+            content = json.loads(local_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            content = None
+
+        cache_doc = {
+            "id": self._mongo.next_id("run_cache"),
+            "run_id": run_id,
+            "cache_type": stem,
+            "filename": local_path.name,
+            "local_path": str(local_path),
+            "content": content,
+            "created_at": datetime.now().isoformat(),
+        }
+
+        # Add B2 key if cloud is enabled
+        if self.cloud_enabled:
+            b2 = self._get_b2()
+            b2.upload_file("cache", str(local_path), key=key)
+            cache_doc["b2_bucket"] = "cache"
+            cache_doc["b2_key"] = key
+
+        # Save to MongoDB regardless of cloud status
+        self._mongo.insert("run_cache", cache_doc)
+
+        return {
+            "cache_type": stem,
+            "filename": local_path.name,
+            "local_path": str(local_path),
+            "b2_key": key if self.cloud_enabled else None,
+        }
+
+    # ── Public: Sync a complete run ───────────────────────────────────
+
+    def sync_run(
+        self,
+        run_id: str,
+        topic: str | None = None,
+        job_id: int | None = None,
+        category: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Sync all artifacts for a pipeline run to cloud + MongoDB.
+
+        This should be called AFTER ``news_agent`` finishes and has
+        written its output files locally.
+
+        Args:
+            run_id:   The pipeline run UUID.
+            topic:    The topic/keyword that was processed.
+            job_id:   The scheduler job ID (if applicable).
+            category: The category (e.g. "sports", "politics").
+
+        Returns:
+            A dict with upload results for each artifact type.
+        """
+        now = datetime.now().isoformat()
+
+        # ── Find local files ──────────────────────────────────────────
+        html_path = self._find_html_for_run(run_id)
+        md_path = self._find_md_for_run(run_id)
+        image_paths = self._find_images_for_run(run_id)
+        cache_paths = self._find_cache_files(run_id)
+
+        # ── Build B2 object keys (structured: runs/{run_id}/...) ──────
+        html_key = f"runs/{run_id}/article.html" if html_path else None
+        md_key = f"runs/{run_id}/article.md" if md_path else None
+
+        # ── Upload to B2 ──────────────────────────────────────────────
+        html_info = self._upload_if_exists("blogs", html_path, html_key) if html_key else None
+        md_info = self._upload_if_exists("blogs", md_path, md_key) if md_key else None
+
+        image_infos = []
+        image_url_map: dict[str, str] = {}  # filename → B2 presigned URL
+        for img_path in image_paths:
+            # Key WITHOUT the "images/" prefix — the engine's category
+            # resolution adds it automatically.  Final key:
+            #   images/runs/{run_id}/{filename}
+            img_key = f"runs/{run_id}/{img_path.name}"
+            info = self._upload_if_exists("images", img_path, img_key)
+            if info:
+                image_infos.append(info)
+                # Build a filename → URL map for HTML rewriting later
+                if info.get("url"):
+                    image_url_map[img_path.name] = info["url"]
+
+        cache_infos = []
+        for cache_path in cache_paths:
+            info = self._upload_cache_file(cache_path, run_id)
+            if info:
+                cache_infos.append(info)
+
+        # ── Save blog_metadata to MongoDB ─────────────────────────────
+        blog_doc = {
+            "id": self._mongo.next_id("blog_metadata"),
+            "run_id": run_id,
+            "topic": topic,
+            "job_id": job_id,
+            "category": category,
+            "status": "generated",
+            "created_at": now,
+            "updated_at": now,
+
+            # Local paths (valid during same container lifecycle)
+            "local_html_path": str(html_path) if html_path else None,
+            "local_md_path": str(md_path) if md_path else None,
+
+            # B2 references (survive deploys)
+            "b2_html_key": html_info.get("key") if html_info else None,
+            "b2_html_url": html_info.get("url") if html_info else None,
+            "b2_md_key": md_info.get("key") if md_info else None,
+            "b2_md_url": md_info.get("url") if md_info else None,
+            "b2_image_keys": [i.get("key") for i in image_infos if i.get("key")],
+            "b2_image_urls": [i.get("url") for i in image_infos if i.get("url")],
+            # Map of local image filename → B2 presigned URL.
+            # Used by rewrite_image_urls() to fix <img src="..."> tags
+            # in HTML retrieved from cloud after a deploy.
+            "b2_image_map": image_url_map,
+
+            # Publish tracking
+            "published": False,
+            "publish_status": None,
+            "wordpress_synced": False,
+        }
+
+        # Check if metadata for this run_id already exists → update instead
+        existing = self._mongo.find_one("blog_metadata", {"run_id": run_id})
+        if existing:
+            updates = {k: v for k, v in blog_doc.items() if k != "id" and v is not None}
+            self._mongo.update_one("blog_metadata", {"run_id": run_id}, updates)
+            blog_meta_id = existing.get("id")
+        else:
+            self._mongo.insert("blog_metadata", blog_doc)
+            blog_meta_id = blog_doc["id"]
+
+        return {
+            "run_id": run_id,
+            "cloud_enabled": self.cloud_enabled,
+            "html": html_info,
+            "md": md_info,
+            "images": image_infos,
+            "cache_files": cache_infos,
+            "blog_metadata_id": blog_meta_id,
+        }
+
+    # ── Public: Retrieve content ──────────────────────────────────────
+
+    def get_blog_metadata(self, run_id: str) -> dict | None:
+        """
+        Get blog metadata for a run_id from MongoDB.
+
+        Returns the metadata document with both local paths and
+        B2 references, or None if not found.
+        """
+        return self._mongo.find_one("blog_metadata", {"run_id": run_id})
+
+    def get_html_content(self, run_id: str) -> str | None:
+        """
+        Get the HTML content for a run_id.
+
+        Tries local file first (fast), then falls back to B2.
+        Returns the HTML string, or None if not found anywhere.
+        """
+        meta = self.get_blog_metadata(run_id)
+        if not meta:
+            return None
+
+        # ── Try local file first ──────────────────────────────────────
+        local_path = meta.get("local_html_path")
+        if local_path:
+            path = Path(local_path)
+            if path.exists():
+                return path.read_text(encoding="utf-8", errors="replace")
+
+        # ── Try finding by pattern if metadata local path is stale ────
+        html_path = self._find_html_for_run(run_id)
+        if html_path and html_path.exists():
+            return html_path.read_text(encoding="utf-8", errors="replace")
+
+        # ── Fallback to B2 ────────────────────────────────────────────
+        b2_key = meta.get("b2_html_key")
+        if b2_key and self.cloud_enabled:
+            try:
+                b2 = self._get_b2()
+                bucket = meta.get("b2_html_bucket", "blogs")
+                data = b2.download_bytes(bucket, b2_key)
+                return data.decode("utf-8", errors="replace")
+            except Exception as exc:
+                print(f"CloudSync: failed to fetch HTML from B2: {exc}")
+
+        return None
+
+    def get_md_content(self, run_id: str) -> str | None:
+        """Get the Markdown content for a run_id (local first, B2 fallback)."""
+        meta = self.get_blog_metadata(run_id)
+        if not meta:
+            return None
+
+        local_path = meta.get("local_md_path")
+        if local_path:
+            path = Path(local_path)
+            if path.exists():
+                return path.read_text(encoding="utf-8", errors="replace")
+
+        md_path = self._find_md_for_run(run_id)
+        if md_path and md_path.exists():
+            return md_path.read_text(encoding="utf-8", errors="replace")
+
+        b2_key = meta.get("b2_md_key")
+        if b2_key and self.cloud_enabled:
+            try:
+                b2 = self._get_b2()
+                bucket = meta.get("b2_md_bucket", "blogs")
+                data = b2.download_bytes(bucket, b2_key)
+                return data.decode("utf-8", errors="replace")
+            except Exception as exc:
+                print(f"CloudSync: failed to fetch MD from B2: {exc}")
+
+        return None
+
+    def rewrite_image_urls(self, html: str, run_id: str) -> str:
+        """
+        Rewrite local image paths in HTML to B2 presigned URLs.
+
+        After a CI/CD deploy, local image files are gone.  When the HTML
+        is fetched from B2, its ``<img src="...">`` tags still reference
+        local paths like ``/storage/images/foo.jpg`` or ``images/foo.jpg``.
+        This method rewrites those URLs to point to the corresponding
+        B2 presigned URLs stored in blog_metadata.b2_image_map.
+
+        Args:
+            html:    The HTML content (typically fetched from B2).
+            run_id:  The run_id to look up image URLs for.
+
+        Returns:
+            HTML with local image paths replaced by B2 presigned URLs.
+            If no metadata or no image map is found, returns the HTML
+            unchanged.
+        """
+        if not html:
+            return html
+
+        meta = self.get_blog_metadata(run_id)
+        if not meta:
+            return html
+
+        image_map: dict[str, str] = meta.get("b2_image_map") or {}
+        if not image_map:
+            # Fall back to the parallel b2_image_keys / b2_image_urls lists
+            keys = meta.get("b2_image_keys") or []
+            urls = meta.get("b2_image_urls") or []
+            for key, url in zip(keys, urls):
+                # key looks like "images/runs/{run_id}/{filename}"
+                filename = key.rsplit("/", 1)[-1] if key else ""
+                if filename and url:
+                    image_map[filename] = url
+
+        if not image_map:
+            return html
+
+        # Regex to find <img ... src="..." ...> tags
+        import re
+
+        def _replace_src(match: re.Match) -> str:
+            full_tag = match.group(0)
+            src_match = re.search(
+                r'src\s*=\s*("([^"]*)"|\'([^\']*)\'|([^\s>]+))',
+                full_tag,
+                flags=re.IGNORECASE,
+            )
+            if not src_match:
+                return full_tag
+
+            src_value = src_match.group(2) or src_match.group(3) or src_match.group(4) or ""
+            if not src_value:
+                return full_tag
+
+            # Skip absolute URLs (http://, https://, //)
+            if src_value.startswith(("http://", "https://", "//")):
+                return full_tag
+
+            # Skip data URIs
+            if src_value.startswith("data:"):
+                return full_tag
+
+            # Extract filename from the local path
+            # /storage/images/foo.jpg → foo.jpg
+            # images/foo.jpg           → foo.jpg
+            # foo.jpg                  → foo.jpg
+            filename = src_value.rsplit("/", 1)[-1]
+            # Strip query string / hash
+            filename = filename.split("?", 1)[0].split("#", 1)[0]
+
+            new_url = image_map.get(filename)
+            if not new_url:
+                return full_tag
+
+            # Replace the src value in the original tag
+            new_tag = (
+                full_tag[:src_match.start(2)]
+                + new_url
+                + full_tag[src_match.end(2):]
+            ) if src_match.group(2) else (
+                full_tag[:src_match.start(3)]
+                + new_url
+                + full_tag[src_match.end(3):]
+            ) if src_match.group(3) else (
+                full_tag[:src_match.start(4)]
+                + new_url
+                + full_tag[src_match.end(4):]
+            )
+            return new_tag
+
+        # Match <img ...> tags (self-closing or with attributes)
+        img_pattern = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
+        return img_pattern.sub(_replace_src, html)
+
+    def mark_published(self, run_id: str, publish_status: str = "success") -> None:
+        """Update blog_metadata to mark a run as published."""
+        self._mongo.update_one(
+            "blog_metadata",
+            {"run_id": run_id},
+            {
+                "published": True,
+                "publish_status": publish_status,
+                "updated_at": datetime.now().isoformat(),
+            },
+        )
+
+    def mark_wordpress_synced(self, run_id: str, post_id: int | None = None) -> None:
+        """Update blog_metadata to mark WordPress sync as done."""
+        updates = {
+            "wordpress_synced": True,
+            "updated_at": datetime.now().isoformat(),
+        }
+        if post_id is not None:
+            updates["wordpress_post_id"] = post_id
+        self._mongo.update_one("blog_metadata", {"run_id": run_id}, updates)
+
+    # ── Scheduler status (replaces scheduler_status.json) ─────────────
+
+    def save_scheduler_status(self, data: dict) -> None:
+        """
+        Persist scheduler status to MongoDB.
+
+        Replaces the old _write_status() pattern that wrote to
+        scheduler_status.json.  Uses a singleton document with
+        _id = "scheduler".
+        """
+        self._mongo.db["scheduler_status"].update_one(
+            {"_id": "scheduler"},
+            {"$set": {**data, "updated_at": datetime.now().isoformat()}},
+            upsert=True,
+        )
+
+    def load_scheduler_status(self) -> dict[str, Any]:
+        """
+        Load scheduler status from MongoDB.
+
+        Replaces the old _read_status() pattern.  Returns default
+        values if no status document exists yet.
+        """
+        doc = self._mongo.db["scheduler_status"].find_one({"_id": "scheduler"})
+        if doc:
+            doc.pop("_id", None)
+            return doc
+        return {
+            "last_triggered_at": None,
+            "last_main_status": "never",
+            "last_main_at": None,
+            "last_main_run_id": None,
+            "last_api_status": "never",
+            "last_api_at": None,
+            "last_api_html": None,
+            "last_error": None,
+        }
+
+    # ── Published topics dedup (replaces published_topics.json) ───────
+
+    def is_topic_published(self, topic: str, lookback_hours: int = 48) -> bool:
+        """
+        Check if a topic was already published within the lookback window.
+
+        Uses MongoDB instead of published_topics.json, so the dedup
+        check survives deploys.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now() - timedelta(hours=lookback_hours)).isoformat()
+        doc = self._mongo.find_one("published_topics", {
+            "topic": {"$regex": f"^{topic}$", "$options": "i"},
+            "published_at": {"$gte": cutoff},
+        })
+        return doc is not None
+
+    def record_published_topic(self, topic: str, run_id: str) -> None:
+        """Record that a topic was published (for dedup)."""
+        existing = self._mongo.find_one("published_topics", {"topic": topic})
+        if existing:
+            self._mongo.update_one("published_topics", {"topic": topic}, {
+                "published_at": datetime.now().isoformat(),
+                "run_id": run_id,
+            })
+        else:
+            self._mongo.insert("published_topics", {
+                "id": self._mongo.next_id("published_topics"),
+                "topic": topic,
+                "run_id": run_id,
+                "published_at": datetime.now().isoformat(),
+            })
+
+    # ── Run cache helpers ─────────────────────────────────────────────
+
+    def get_run_cache(self, run_id: str, cache_type: str | None = None) -> list[dict]:
+        """
+        Get cached data for a run from MongoDB.
+
+        Args:
+            run_id:     The pipeline run UUID.
+            cache_type: Optional filter (e.g. "research", "run", "publish").
+        """
+        query: dict = {"run_id": run_id}
+        if cache_type:
+            query["cache_type"] = cache_type
+        return self._mongo.find_many("run_cache", query, sort=[("created_at", -1)])
+
+    # ── Initialize on startup ─────────────────────────────────────────
+
+    def initialize(self) -> dict[str, Any]:
+        """
+        Initialize both engines (MongoDB collections + B2 buckets).
+
+        Call this once on app startup.  Returns a summary of what
+        was created.
+        """
+        result: dict[str, Any] = {}
+
+        # MongoDB collections + indexes
+        result["mongo"] = self._mongo.ensure_collections()
+
+        # B2 buckets (only if configured)
+        if self.cloud_enabled:
+            try:
+                b2 = self._get_b2()
+                result["b2"] = b2.ensure_buckets()
+            except Exception as exc:
+                result["b2"] = {"error": str(exc)}
+        else:
+            result["b2"] = "not_configured"
+
+        return result
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+-----------------------------------app/config.json---------------------------------------------
 {
     "country": "US",
     "category_name": "Business",
@@ -101,9 +2441,51 @@ app/config.json
     "topic_category": "business",
     "schedule_every_hours": 4
 }
-------------------------------------------------------
-app/main.py
+--------------------------------------------------------------------------------
 
+
+
+
+
+---------------------------------------app/db_config.json-----------------------------------------
+{
+    "db_backend": "mongo",
+    "sqlite": {
+        "db_path": "app/scheduler.db"
+    },
+    "mongo": {
+        "db_name": "trend_scheduler",
+        "jobs_collection": "scheduler_jobs",
+        "history_collection": "execution_history"
+    },
+    "backblaze": {
+        "enabled": true,
+        "endpoint_url_env": "B2_ENDPOINT_URL",
+        "access_key_id_env": "B2_ACCESS_KEY_ID",
+        "secret_access_key_env": "B2_SECRET_ACCESS_KEY",
+        "region_env": "B2_REGION",
+        "bucket_name_env": "B2_BUCKET_NAME",
+        "default_bucket_name": "trend-agent",
+        "design": "single bucket + category prefixes (blogs/, images/, cache/, memory/, trends/, archives/)",
+        "categories": [
+            "blogs",
+            "images",
+            "cache",
+            "memory",
+            "trends",
+            "archives"
+        ]
+    },
+    "cloud_sync": {
+        "enabled": true
+    }
+}
+--------------------------------------------------------------------------------
+
+
+
+
+-------------------------------------app/main.py-------------------------------------------
 from __future__ import annotations
 
 from dataclasses import replace
@@ -241,10 +2623,433 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+--------------------------------------------------------------------------------
 
-------------------------------------------------------
 
-app/publish_local_html.py
+
+
+
+
+----------------------------------------app/mongo_engine.py----------------------------------------
+"""
+MongoDB Engine for the Trend Agent Scheduler.
+
+A self-contained, reusable engine that handles:
+
+  1. **Connection lifecycle** — lazy singleton via ``MongoEngine.instance()``.
+     Reads MONGO_URI / MONGO_USERNAME / MONGO_PASSWORD from environment
+     (or accepts them as parameters).  Works with Atlas SRV URIs.
+
+  2. **Auto-creation** — the first call to ``engine.ensure_collections()``
+     creates the database, collections, indexes, and counters atomically.
+     MongoDB creates databases and collections implicitly on first write;
+     this method guarantees indexes exist *before* the app writes data.
+
+  3. **Auto-incrementing integer IDs** — ``engine.next_id(collection_name)``
+     uses an atomic ``find_one_and_update`` on a ``_counters`` collection
+     so the rest of the codebase can keep using integer ``id`` fields
+     (matching the SQLite convention).
+
+  4. **Generic CRUD helpers** — ``insert``, ``find_one``, ``find_many``,
+     ``update_one``, ``delete_one``, ``delete_many`` that strip ``_id``
+     automatically so callers never see ObjectId.
+
+  5. **Health check** — ``engine.ping()`` verifies connectivity.
+
+Usage::
+
+    from app.mongo_engine import MongoEngine
+
+    engine = MongoEngine.instance()
+    engine.ensure_collections()
+    doc = engine.insert("scheduler_jobs", {"id": engine.next_id("scheduler_jobs"), ...})
+    rows = engine.find_many("scheduler_jobs", sort=[("created_at", -1)])
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Optional
+
+from pymongo import MongoClient
+from pymongo.collection import Collection
+from pymongo.errors import ConnectionFailure
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv(override=True)  # Load .env variables into os.environ
+
+
+# ── Collection schema registry ───────────────────────────────────────────
+# Each entry declares the indexes that must exist for a collection.
+# The engine creates them in ``ensure_collections()``.
+
+COLLECTION_SCHEMA: dict[str, list[dict]] = {
+    "scheduler_jobs": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_jobs_id"},
+        {"keys": [("status", 1), ("next_run_at", 1)], "name": "idx_jobs_status_next"},
+        {"keys": [("created_at", -1)], "name": "idx_jobs_created"},
+    ],
+    "execution_history": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_history_id"},
+        {"keys": [("job_id", 1)], "name": "idx_history_job"},
+        {"keys": [("started_at", -1)], "name": "idx_history_started"},
+    ],
+    "_counters": [
+        # {"keys": [("_id", 1)], "unique": True, "name": "idx_counters_id"},
+    ],
+    # ── Blog metadata: tracks all generated articles across deploys ──
+    "blog_metadata": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_blog_meta_id"},
+        {"keys": [("run_id", 1)], "unique": True, "name": "idx_blog_meta_run_id"},
+        {"keys": [("topic", 1)], "name": "idx_blog_meta_topic"},
+        {"keys": [("status", 1)], "name": "idx_blog_meta_status"},
+        {"keys": [("created_at", -1)], "name": "idx_blog_meta_created"},
+    ],
+    # ── Scheduler status: replaces scheduler_status.json ─────────────
+    "scheduler_status": [
+        # {"keys": [("_id", 1)], "unique": True, "name": "idx_sched_status_id"},
+    ],
+    # ── Run cache: replaces storage/cache/*.json files ───────────────
+    "run_cache": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_run_cache_id"},
+        {"keys": [("run_id", 1)], "name": "idx_run_cache_run_id"},
+        {"keys": [("cache_type", 1)], "name": "idx_run_cache_type"},
+        {"keys": [("run_id", 1), ("cache_type", 1)], "name": "idx_run_cache_run_type"},
+    ],
+    # ── Published topics: dedup check across deploys ─────────────────
+    "published_topics": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_pub_topics_id"},
+        {"keys": [("topic", 1)], "name": "idx_pub_topics_topic"},
+        {"keys": [("published_at", -1)], "name": "idx_pub_topics_date"},
+    ],
+    # ── Editorial memory: replaces storage/memory/editorial_memory.jsonl
+    "editorial_memory": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_ed_mem_id"},
+        {"keys": [("created_at", -1)], "name": "idx_ed_mem_created"},
+    ],
+}
+
+
+class MongoEngine:
+    """
+    Lightweight MongoDB engine with connection management, auto-creation,
+    and generic CRUD helpers.
+
+    Use ``MongoEngine.instance()`` to get the singleton, or construct
+    directly for testing.
+    """
+
+    _instance: Optional[MongoEngine] = None
+
+    # ── Singleton ─────────────────────────────────────────────────────
+
+    @classmethod
+    def instance(
+        cls,
+        mongo_uri: str | None = None,
+        db_name: str = "trend_scheduler",
+    ) -> MongoEngine:
+        """
+        Return the global singleton engine.
+
+        On the very first call the engine is created with the given
+        parameters (or environment variables).  Subsequent calls ignore
+        the parameters and return the existing instance.
+        """
+        if cls._instance is None:
+            cls._instance = cls(mongo_uri=mongo_uri, db_name=db_name)
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton (useful for tests)."""
+        if cls._instance is not None:
+            cls._instance.close()
+            cls._instance = None
+
+    # ── Constructor ───────────────────────────────────────────────────
+
+    def __init__(
+        self,
+        mongo_uri: str | None = None,
+        db_name: str = "trend_scheduler",
+    ) -> None:
+        # ── Resolve URI ──────────────────────────────────────────────
+        self._uri = mongo_uri or os.getenv("MONGO_URI", "")
+        if not self._uri:
+            raise ValueError(
+                "MongoDB URI not configured.  Set MONGO_URI in .env "
+                "or pass mongo_uri to MongoEngine()."
+            )
+
+        # Inject separate username/password if they aren't already in the URI
+        mongo_user = os.getenv("MONGO_USERNAME", "").strip()
+        mongo_pass = os.getenv("MONGO_PASSWORD", "").strip()
+        if mongo_user and mongo_pass and mongo_user not in self._uri:
+            if "://" in self._uri:
+                proto, rest = self._uri.split("://", 1)
+                self._uri = f"{proto}://{mongo_user}:{mongo_pass}@{rest}"
+
+        self._db_name = db_name
+        self._client: Optional[MongoClient] = None
+        self._initialized = False  # True after ensure_collections() succeeds
+
+    # ── Connection ────────────────────────────────────────────────────
+
+    @property
+    def db(self):
+        """
+        Lazily connect and return the database handle.
+
+        The actual TCP connection is deferred until the first operation,
+        so constructing the engine is always safe even if MongoDB is
+        temporarily down.
+        """
+        if self._client is None:
+            self._client = MongoClient(
+                self._uri,
+                serverSelectionTimeoutMS=5000,
+            )
+        return self._client[self._db_name]
+
+    def collection(self, name: str) -> Collection:
+        """Return a collection handle by name."""
+        return self.db[name]
+
+    def close(self) -> None:
+        """Close the underlying client (idempotent)."""
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    # ── Health check ──────────────────────────────────────────────────
+
+    def ping(self) -> bool:
+        """
+        Verify connectivity to the MongoDB server.
+
+        Returns True on success, False on failure.  Does not raise.
+        """
+        try:
+            self.db.client.admin.command("ping")
+            return True
+        except ConnectionFailure:
+            return False
+
+    def get_server_info(self) -> dict[str, Any]:
+        """Return server info dict (version, host, etc.).  Raises on failure."""
+        return self.db.client.admin.command("buildInfo")
+
+    # ── Auto-creation ─────────────────────────────────────────────────
+
+    def ensure_collections(self) -> dict[str, str]:
+        """
+        Create all registered collections and their indexes if they
+        don't already exist.
+
+        MongoDB creates databases and collections lazily on first write,
+        but indexes need to be created explicitly.  This method is
+        idempotent — safe to call on every app startup.
+
+        Returns a dict mapping collection names to "created" or "ok"
+        (already existed with correct indexes).
+        """
+        result: dict[str, str] = {}
+        db = self.db
+
+        for col_name, index_specs in COLLECTION_SCHEMA.items():
+            # Accessing the collection handle does NOT create it, but
+            # creating an index on it will.  This is fine — empty
+            # collections are harmless and will be cleaned up by MongoDB
+            # TTL rules if never written to.
+            col = db[col_name]
+
+            existing_indexes = {idx["name"] for idx in col.list_indexes()}
+
+            for spec in index_specs:
+                idx_name = spec.get("name")
+                if idx_name and idx_name not in existing_indexes:
+                    col.create_index(
+                        spec["keys"],
+                        unique=spec.get("unique", False),
+                        name=idx_name,
+                    )
+
+            result[col_name] = "ok"
+
+        self._initialized = True
+        return result
+
+    def register_collection(self, name: str, indexes: list[dict]) -> None:
+        """
+        Register a custom collection with its index spec.
+
+        Call this **before** ``ensure_collections()`` if you need
+        additional collections beyond the built-in ones.
+
+        Example::
+
+            engine.register_collection("custom_logs", [
+                {"keys": [("id", 1)], "unique": True, "name": "idx_logs_id"},
+                {"keys": [("timestamp", -1)], "name": "idx_logs_ts"},
+            ])
+            engine.ensure_collections()
+        """
+        COLLECTION_SCHEMA[name] = indexes
+
+    # ── Auto-incrementing IDs ─────────────────────────────────────────
+
+    def next_id(self, collection_name: str) -> int:
+        """
+        Atomically increment and return the next integer ID for
+        *collection_name*.
+
+        Uses a ``_counters`` collection with documents like::
+
+            { "_id": "scheduler_jobs", "seq": 42 }
+
+        The first call for a collection returns 1.
+        """
+        doc = self.db["_counters"].find_one_and_update(
+            {"_id": collection_name},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+        )
+        if doc is None:
+            # First insert — find_one_and_update returns None on upsert
+            # but the document was created with seq=1.
+            return 1
+        return doc["seq"] + 1
+
+    def current_id(self, collection_name: str) -> int:
+        """Return the current counter value without incrementing (0 if unset)."""
+        doc = self.db["_counters"].find_one({"_id": collection_name})
+        return doc["seq"] if doc else 0
+
+    # ── Generic CRUD helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _clean(doc: dict | None) -> dict:
+        """Strip ``_id`` from a document so callers never see ObjectId."""
+        if doc is None:
+            return {}
+        doc.pop("_id", None)
+        return doc
+
+    def insert(self, collection_name: str, document: dict) -> dict:
+        """
+        Insert a document and return it (without ``_id``).
+
+        The caller is responsible for setting the ``id`` field via
+        ``engine.next_id()`` before calling this.
+        """
+        col = self.collection(collection_name)
+        col.insert_one(document)
+        return self._clean(document)
+
+    def find_one(self, collection_name: str, query: dict) -> dict | None:
+        """Find a single document and return it without ``_id``."""
+        col = self.collection(collection_name)
+        doc = col.find_one(query)
+        return self._clean(doc) if doc else None
+
+    def find_many(
+        self,
+        collection_name: str,
+        query: dict | None = None,
+        *,
+        sort: list[tuple[str, int]] | None = None,
+        limit: int = 0,
+        skip: int = 0,
+    ) -> list[dict]:
+        """
+        Find multiple documents.
+
+        Args:
+            collection_name: Target collection.
+            query:           MongoDB query dict (default: {}).
+            sort:            List of (field, direction) tuples, e.g. [("created_at", -1)].
+            limit:           Max docs to return (0 = unlimited).
+            skip:            Number of docs to skip.
+        """
+        col = self.collection(collection_name)
+        cursor = col.find(query or {})
+
+        if sort:
+            cursor = cursor.sort(sort)
+        if skip:
+            cursor = cursor.skip(skip)
+        if limit:
+            cursor = cursor.limit(limit)
+
+        return [self._clean(d) for d in cursor]
+
+    def update_one(self, collection_name: str, query: dict, updates: dict) -> dict | None:
+        """
+        Update a single document with ``$set`` and return the updated doc
+        (without ``_id``).  Returns None if no document matched.
+        """
+        col = self.collection(collection_name)
+        col.update_one(query, {"$set": updates})
+        doc = col.find_one(query)
+        return self._clean(doc) if doc else None
+
+    def delete_one(self, collection_name: str, query: dict) -> bool:
+        """Delete a single document.  Returns True if anything was deleted."""
+        col = self.collection(collection_name)
+        result = col.delete_one(query)
+        return result.deleted_count > 0
+
+    def delete_many(self, collection_name: str, query: dict) -> int:
+        """Delete all matching documents.  Returns the count deleted."""
+        col = self.collection(collection_name)
+        result = col.delete_many(query)
+        return result.deleted_count
+
+    def count(self, collection_name: str, query: dict | None = None) -> int:
+        """Return the count of documents matching the query."""
+        col = self.collection(collection_name)
+        return col.count_documents(query or {})
+
+    # ── Convenience ───────────────────────────────────────────────────
+
+    @property
+    def is_initialized(self) -> bool:
+        """True if ``ensure_collections()`` has been called successfully."""
+        return self._initialized
+
+    def list_collections(self) -> list[str]:
+        """Return the names of all collections in the current database."""
+        return self.db.list_collection_names()
+
+    def drop_database(self) -> None:
+        """
+        Drop the entire database.  **Use only in tests.**
+        """
+        self.db.client.drop_database(self._db_name)
+        self._initialized = False
+--------------------------------------------------------------------------------
+
+
+
+
+
+--------------------------------------app/publish_local_html.py--------------------------------------------------------------------------------------------------------------------------
+"""
+Publish local (or cloud-restored) HTML article files to PeopleNewsTime API.
+
+CHANGES FROM ORIGINAL:
+  - Added ``--run-id`` flag: fetch HTML from Backblaze B2 via CloudSync
+    if the local file doesn't exist (e.g. after a deploy).
+  - When ``--run-id`` is provided and ``--file`` is not, automatically
+    locates the HTML content (local-first, B2 fallback).
+  - All original functionality is preserved.
+
+Original description:
+  Publish local HTML article files to PeopleNewsTime backend API.
+"""
 
 from __future__ import annotations
 
@@ -257,11 +3062,14 @@ from pathlib import Path
 from typing import Iterable
 from urllib import error, request
 from urllib.parse import urlsplit
+from dotenv import load_dotenv
+import os
+load_dotenv(override=True)  # Load .env variables into os.environ
 
 
-DEFAULT_ENDPOINT = "https://backendapi.peoplenewstime.com/backend/api/v1/publisher/news/create"
-DEFAULT_CATEGORY_ID = "6a22e0741f748391e98c6bab"
-DEFAULT_LIMIT = 5
+DEFAULT_ENDPOINT = os.getenv("DEFAULT_ENDPOINT", "https://backendapi.peoplenewstime.com/backend/api/v1/publisher/news/create")
+DEFAULT_CATEGORY_ID = os.getenv("DEFAULT_CATEGORY_ID", "6a22e0741f748391e98c6bab")
+DEFAULT_LIMIT = int(os.getenv("DEFAULT_LIMIT", 5))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +3081,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Path to a specific .html file (can be used multiple times)",
+    )
+    parser.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Run ID to look up in cloud storage (can be used multiple times). "
+             "Falls back to Backblaze B2 if local file is missing.",
     )
     parser.add_argument(
         "--dir",
@@ -288,8 +3103,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--status",
         default="draft",
-        choices=["draft", "publish"],
-        help="Status to send to API",
+        choices=["draft", "publish", "published"],
+        help="Status to send to API. 'publish' is auto-normalized to 'published' "
+             "(the form expected by the PeopleNewsTime API).",
     )
     parser.add_argument(
         "--category-id",
@@ -331,6 +3147,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print payload summary without sending requests",
     )
     return parser
+
+
+def strip_uuid_suffix(value: str) -> str:
+    return re.sub(r"-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "", value)
 
 
 def slugify(value: str) -> str:
@@ -406,7 +3226,6 @@ def ensure_target_blank_links(html: str) -> str:
     def repl(match: re.Match[str]) -> str:
         attrs = match.group(1) or ""
 
-        # Ensure links open in a new tab.
         if re.search(r"\btarget\s*=", attrs, flags=re.IGNORECASE):
             attrs = re.sub(
                 r'target\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)',
@@ -417,7 +3236,6 @@ def ensure_target_blank_links(html: str) -> str:
         else:
             attrs = attrs.rstrip() + ' target="_blank"'
 
-        # Keep rel secure for _blank links.
         rel_match = re.search(r'rel\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)', attrs, flags=re.IGNORECASE)
         needed_rel = ["noopener", "noreferrer", "nofollow"]
         if rel_match:
@@ -437,21 +3255,40 @@ def ensure_target_blank_links(html: str) -> str:
     return anchor_pattern.sub(repl, html)
 
 
+def strip_inline_images(html: str) -> str:
+    html = re.sub(
+        r'<figure[^>]*>(?:(?!<\/figure>).)*?<img(?:(?!<\/figure>).)*?<\/figure>',
+        '',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    html = re.sub(r'<img[^>]*/?>',  '', html, flags=re.IGNORECASE)
+    return html
+
+
 def article_payload(file_path: Path, html: str, status: str, category_id: str) -> dict[str, object]:
     base_name = file_path.stem
-    title = find_title(html, fallback=base_name.replace("-", " ").title())
-    slug = slugify(base_name)
+    slug_base = strip_uuid_suffix(base_name)
+    title = find_title(html, fallback=slug_base.replace("-", " ").title())
+    slug = slugify(title)
     excerpt = find_excerpt(html)
     featured_image = find_featured_image(html)
 
-    normalized_content = ensure_target_blank_links(html)
+    content_html = strip_inline_images(html)
+    normalized_content = ensure_target_blank_links(content_html)
+
+    # Normalize status before sending to API.
+    # The PeopleNewsTime API expects "published" (past tense), but the UI /
+    # DB / scheduler service store "publish" (present tense).  Translate here
+    # at the API boundary so no DB migration or UI changes are needed.
+    api_status = _normalize_status(status)
 
     payload = {
         "title": title,
         "slug": slug,
         "excerpt": excerpt,
         "content": normalized_content,
-        "status": status,
+        "status": api_status,
         "featuredImage": featured_image,
         "categories": [category_id],
         "seo": {
@@ -462,6 +3299,51 @@ def article_payload(file_path: Path, html: str, status: str, category_id: str) -
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return payload
+
+
+# ── Status normalization ──────────────────────────────────────────────────
+# The UI / DB / scheduler_service.py use "draft" and "publish" as the two
+# status values.  The PeopleNewsTime API, however, expects "published"
+# (past tense) for published articles.  This helper translates any common
+# variant to the value the API accepts.
+
+# Map of all known input variants → API value.
+_STATUS_MAP: dict[str, str] = {
+    "draft":     "draft",
+    "publish":   "published",   # ← the bug we're fixing
+    "published": "published",
+    "pending":   "draft",
+    "private":   "draft",
+}
+
+
+def _normalize_status(status: str) -> str:
+    """
+    Translate the internal status label to the value the PeopleNewsTime
+    API expects.
+
+    Args:
+        status: One of "draft", "publish", "published" (case-insensitive).
+
+    Returns:
+        "draft" or "published" — the value to send in the API payload.
+
+    If the input is unrecognized, a warning is printed and "draft" is
+    returned as a safe default.
+    """
+    if not status:
+        return "draft"
+
+    key = status.strip().lower()
+    if key in _STATUS_MAP:
+        normalized = _STATUS_MAP[key]
+        if normalized != key:
+            print(f"[publish] Normalizing status: {status!r} -> {normalized!r} "
+                  f"(API expects past-tense 'published')")
+        return normalized
+
+    print(f"[publish] WARNING: Unknown status {status!r}, defaulting to 'draft'")
+    return "draft"
 
 
 def iter_html_files(files: list[str], directory: str, limit: int) -> Iterable[Path]:
@@ -482,6 +3364,75 @@ def iter_html_files(files: list[str], directory: str, limit: int) -> Iterable[Pa
         count += 1
         if count >= limit:
             break
+
+
+# ── Cloud fallback: fetch HTML from Backblaze B2 via CloudSync ──────────────
+
+def _fetch_from_cloud(run_id: str) -> tuple[Path, str] | None:
+    """
+    Try to fetch HTML content from cloud storage for a run_id.
+
+    After fetching the HTML from B2, this also rewrites local image
+    paths (``/storage/images/foo.jpg``, ``images/foo.jpg``, etc.) to
+    B2 presigned URLs so that the featuredImage URL extracted downstream
+    is still accessible after a deploy.
+
+    Returns (temp_file_path, html_content) or None.
+    """
+    try:
+        from app.cloud_sync import CloudSync
+        sync = CloudSync.instance()
+        html = sync.get_html_content(run_id)
+        if html:
+            # Rewrite local image paths to B2 presigned URLs.
+            # Without this, the featuredImage URL extracted from the HTML
+            # would point to a local file that no longer exists after a deploy.
+            try:
+                html = sync.rewrite_image_urls(html, run_id)
+            except Exception as exc:
+                print(f"WARNING: image URL rewriting failed for run_id={run_id}: {exc}")
+                print("  HTML will be used as-is; featured image URL may be broken.")
+            # Write to a temp file so the rest of the pipeline works
+            temp_dir = Path("storage/blogs")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = temp_dir / f"cloud-{run_id}.html"
+            temp_path.write_text(html, encoding="utf-8")
+            return temp_path, html
+    except Exception as exc:
+        print(f"Cloud fetch failed for run_id={run_id}: {exc}")
+    return None
+
+
+def _resolve_run_ids(run_ids: list[str], limit: int) -> list[tuple[Path, str]]:
+    """
+    Resolve run_ids to (file_path, html_content) tuples.
+
+    Strategy: local file first → cloud fetch fallback.
+    """
+    results = []
+    for run_id in run_ids[:limit]:
+        # Try local file first
+        blogs_dir = Path("storage/blogs")
+        if blogs_dir.exists():
+            candidates = sorted(
+                blogs_dir.glob(f"*-{run_id}.html"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                path = candidates[0]
+                html = path.read_text(encoding="utf-8", errors="replace")
+                results.append((path, html))
+                continue
+
+        # Fall back to cloud
+        cloud_result = _fetch_from_cloud(run_id)
+        if cloud_result:
+            results.append(cloud_result)
+        else:
+            print(f"No HTML found for run_id={run_id} (local or cloud)")
+
+    return results
 
 
 def _endpoint_origin(endpoint: str) -> str:
@@ -544,16 +3495,41 @@ def main() -> int:
         print(f"Missing bearer token. Set environment variable: {args.token_env}")
         return 1
 
-    files = list(iter_html_files(args.file, args.dir, max(1, args.limit)))
-    if not files:
+    # ── Collect HTML sources ──────────────────────────────────────────
+    sources: list[tuple[Path, str]] = []  # (file_path, html_content)
+
+    # From --file arguments
+    if args.file:
+        for file_path in args.file:
+            path = Path(file_path)
+            if path.exists() and path.suffix.lower() == ".html":
+                html = path.read_text(encoding="utf-8", errors="replace")
+                sources.append((path, html))
+            else:
+                print(f"File not found: {file_path}")
+
+    # From --run-id arguments (with cloud fallback)
+    if args.run_id:
+        run_sources = _resolve_run_ids(args.run_id, limit=args.limit)
+        sources.extend(run_sources)
+
+    # From directory scan (original behavior)
+    if not args.file and not args.run_id:
+        for path in iter_html_files([], args.dir, max(1, args.limit)):
+            html = path.read_text(encoding="utf-8", errors="replace")
+            sources.append((path, html))
+
+    if not sources:
         print("No HTML files found to publish.")
         return 1
 
-    print(f"Preparing {len(files)} file(s) for publish")
+    # ── Apply limit ───────────────────────────────────────────────────
+    sources = sources[:args.limit]
+
+    print(f"Preparing {len(sources)} file(s) for publish")
     success = 0
 
-    for file_path in files:
-        html = file_path.read_text(encoding="utf-8", errors="replace")
+    for file_path, html in sources:
         payload = article_payload(file_path, html, status=args.status, category_id=args.category_id)
 
         if args.dry_run:
@@ -584,111 +3560,1055 @@ def main() -> int:
             print(f"FAIL {file_path.name} -> {code}")
             print(response_body[:500])
 
-    print(f"Completed: {success}/{len(files)} succeeded")
-    return 0 if success == len(files) else 2
+    print(f"Completed: {success}/{len(sources)} succeeded")
+    return 0 if success == len(sources) else 2
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+--------------------------------------------------------------------------------
 
-------------------------------------------------------
 
-app/scheduler_app.py
-from flask import Flask, render_template, request, redirect
-import json
-import os
 
-from app.scheduler_runner import load_scheduler_status, start_scheduler, update_scheduler
-from app.scheduler_config import CATEGORY_MAP, COUNTRIES
+
+
+
+
+---------------------------------------app/scheduler_app.py-----------------------------------------
+"""
+Flask web UI for the Trend Agent Scheduler.
+
+Standalone layer — reads/writes the SQLite DB via scheduler_db and
+controls execution via scheduler_service.  Never imports from news_agent.
+
+Three job types:
+  - alarm:   Run once at a specific time
+  - interval: Run every N hours (article generation)
+  - index:    Crawl sitemap → embed → store (background indexing)
+
+API routes:
+    GET  /                  Render dashboard
+    GET  /api/jobs          List all jobs
+    POST /api/jobs          Create job
+    PUT  /api/jobs/<id>     Update job
+    DELETE /api/jobs/<id>   Soft-delete (cancel) job
+    POST /api/jobs/<id>/pause   Pause a job
+    POST /api/jobs/<id>/resume  Resume a job
+    POST /api/jobs/<id>/run     Run a job now (manual trigger)
+    GET  /api/history       List execution history
+"""
+
+from __future__ import annotations
+
+import threading
+from datetime import datetime
+
+from flask import Flask, render_template, request, jsonify
+
+from app.scheduler_config import (
+    CATEGORY_MAP,
+    ALL_CATEGORIES_LABEL,
+    COUNTRIES,
+    WORDPRESS_STATUSES,
+    VALID_JOB_TYPES,
+    JOB_TYPE_ALARM,
+    JOB_TYPE_INDEX,
+    JOB_STATUS_PAUSED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_CANCELLED,
+)
+from app.scheduler_db import (
+    create_job,
+    get_all_jobs,
+    get_job,
+    update_job,
+    soft_delete_job,
+    hard_delete_job,
+    get_history,
+)
+from app.scheduler_service import start_scheduler_service, execute_job
 
 app = Flask(__name__)
 
 
+# ── Page ─────────────────────────────────────────────────────────────────
+
 @app.route("/")
 def home():
-
-    with open("app/config.json", "r") as f:
-        config = json.load(f)
-    status = load_scheduler_status()
-
     return render_template(
         "index.html",
-        config=config,
-        status=status,
-        categories=CATEGORY_MAP.keys(),
-        countries=COUNTRIES
+        categories=CATEGORY_MAP,
+        countries=COUNTRIES,
+        wordpress_statuses=WORDPRESS_STATUSES,
     )
 
 
-@app.route("/save", methods=["POST"])
-def save():
+# ── Jobs API ─────────────────────────────────────────────────────────────
 
-    category_name = request.form["category"]
-    category_details = CATEGORY_MAP[category_name]
+@app.route("/api/jobs", methods=["GET"])
+def api_list_jobs():
+    return jsonify(get_all_jobs())
 
-    data = {
-        "country": request.form["country"],
+
+@app.route("/api/jobs", methods=["POST"])
+def api_create_job():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Job name is required"}), 400
+
+    job_type = data.get("job_type", "interval")
+    if job_type not in VALID_JOB_TYPES:
+        return jsonify({"error": f"Invalid job type: {job_type}. Must be one of: {', '.join(VALID_JOB_TYPES)}"}), 400
+
+    # ═══════════════════════════════════════════════════════════════════
+    # INDEX JOB — minimal validation (no category/country needed)
+    # ═══════════════════════════════════════════════════════════════════
+    if job_type == JOB_TYPE_INDEX:
+        interval_hours = data.get("interval_hours", 24)  # Default 24h for indexing
+
+        job = create_job({
+            "name": name,
+            "job_type": job_type,
+            "interval_hours": interval_hours,
+            # Index jobs don't need these, but DB requires them
+            "country": "US",
+            "category_name": "Indexing",
+            "topic_category": "",
+            "category_id": "",
+            "wordpress_status": "draft",
+        })
+        return jsonify(job), 201
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ALARM / INTERVAL JOBS — full validation
+    # ═══════════════════════════════════════════════════════════════════
+
+    # Alarm must have a future datetime
+    if job_type == JOB_TYPE_ALARM:
+        run_at = (data.get("run_at") or "").strip()
+        if not run_at:
+            return jsonify({"error": "Alarm jobs require a date and time"}), 400
+        try:
+            run_time = datetime.fromisoformat(run_at)
+            if run_time <= datetime.now():
+                return jsonify({"error": "Alarm time must be in the future"}), 400
+        except ValueError:
+            return jsonify({"error": f"Invalid datetime: {run_at}"}), 400
+
+    # Resolve category
+    category_name = data.get("category_name", ALL_CATEGORIES_LABEL)
+
+    if category_name == ALL_CATEGORIES_LABEL:
+        # All Categories mode — runs all 5 categories sequentially
+        topic_category = "all"
+        category_id = ""
+    else:
+        cat = CATEGORY_MAP.get(category_name, {})
+        topic_category = cat.get("topic_category", data.get("topic_category", "sports"))
+        category_id = cat.get("category_id", data.get("category_id", ""))
+
+    job = create_job({
+        "name": name,
+        "job_type": job_type,
+        "run_at": data.get("run_at"),
+        "interval_hours": data.get("interval_hours", 4),
+        "country": data.get("country", "US"),
         "category_name": category_name,
-        "category_id": category_details["category_id"],
-        "topic_category": category_details["topic_category"],
-        "schedule_every_hours": 4,
-    }
+        "topic_category": topic_category,
+        "category_id": category_id,
+        "wordpress_status": data.get("wordpress_status", "draft"),
+    })
+    return jsonify(job), 201
 
-    with open("app/config.json", "w") as f:
-        json.dump(data, f, indent=4)
 
-    # Reload scheduler with recurring 4-hour interval.
-    update_scheduler()
+@app.route("/api/jobs/<int:job_id>", methods=["PUT"])
+def api_update_job(job_id):
+    data = request.get_json(silent=True) or {}
+    existing = get_job(job_id)
+    if not existing:
+        return jsonify({"error": "Job not found"}), 404
 
-    return redirect("/")
+    # Map category if changed (only for non-index jobs)
+    if existing.get("job_type") != JOB_TYPE_INDEX:
+        cat_name = data.get("category_name")
+        if cat_name == ALL_CATEGORIES_LABEL:
+            data["topic_category"] = "all"
+            data["category_id"] = ""
+        elif cat_name and cat_name in CATEGORY_MAP:
+            cat = CATEGORY_MAP[cat_name]
+            data["topic_category"] = cat["topic_category"]
+            data["category_id"] = cat["category_id"]
 
+    job = update_job(job_id, data)
+    return jsonify(job)
+
+
+@app.route("/api/jobs/<int:job_id>", methods=["DELETE"])
+def api_delete_job(job_id):
+    perm = request.args.get("permanent", "").lower() == "true"
+    existing = get_job(job_id)
+    if not existing:
+        return jsonify({"error": "Job not found"}), 404
+
+    if perm:
+        hard_delete_job(job_id)
+        return jsonify({"message": f"Job {job_id} permanently deleted"})
+    else:
+        soft_delete_job(job_id)
+        return jsonify({"message": f"Job {job_id} cancelled"})
+
+
+@app.route("/api/jobs/<int:job_id>/pause", methods=["POST"])
+def api_pause_job(job_id):
+    existing = get_job(job_id)
+    if not existing:
+        return jsonify({"error": "Job not found"}), 404
+    if existing["status"] not in ("pending", "failed"):
+        return jsonify({"error": f"Cannot pause a job in '{existing['status']}' state"}), 400
+    return jsonify(update_job(job_id, {"status": JOB_STATUS_PAUSED}))
+
+
+@app.route("/api/jobs/<int:job_id>/resume", methods=["POST"])
+def api_resume_job(job_id):
+    existing = get_job(job_id)
+    if not existing:
+        return jsonify({"error": "Job not found"}), 404
+    if existing["status"] != JOB_STATUS_PAUSED:
+        return jsonify({"error": f"Cannot resume a job in '{existing['status']}' state"}), 400
+    return jsonify(update_job(job_id, {"status": JOB_STATUS_PENDING}))
+
+
+@app.route("/api/jobs/<int:job_id>/run", methods=["POST"])
+def api_run_job(job_id):
+    existing = get_job(job_id)
+    if not existing:
+        return jsonify({"error": "Job not found"}), 404
+    if existing["status"] == JOB_STATUS_RUNNING:
+        return jsonify({"error": "Job is already running"}), 400
+
+    # Allow re-running completed, failed, cancelled, and pending jobs
+    # (previously blocked completed/cancelled, but that's annoying for testing)
+    thread = threading.Thread(
+        target=execute_job,
+        args=(job_id,),
+        kwargs={"trigger_type": "manual"},
+        daemon=True,
+    )
+    thread.start()
+    return jsonify({
+        "message": f"Job '{existing['name']}' triggered",
+        "status": "ok",
+    })
+
+
+# ── History API ──────────────────────────────────────────────────────────
+
+@app.route("/api/history", methods=["GET"])
+def api_history():
+    job_id = request.args.get("job_id", type=int)
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify(get_history(job_id=job_id, limit=limit))
+
+
+# ── Main ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    start_scheduler_service()
+    app.run(host="0.0.0.0", port=8000, debug=False)
+--------------------------------------------------------------------------------
 
-    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        start_scheduler()
 
-    app.run(
-        host="0.0.0.0",
-        port=8000,
-        debug=True
-    )
-------------------------------------------------------
-app/scheduler_config.py
+
+
+
+
+
+
+
+------------------------------------app/scheduler_config.py--------------------------------------------
+"""
+Configuration constants for the Trend Agent Scheduler.
+
+Edit this file to change available categories, countries, etc.
+"""
+
+from __future__ import annotations
+
+# ── Job Types ─────────────────────────────────────────────────────────────
+
+JOB_TYPE_ALARM = "alarm"        # Run once at a specific time
+JOB_TYPE_INTERVAL = "interval"  # Run every N hours
+JOB_TYPE_INDEX = "index"        # Crawl sitemap → embed → store (background indexing)
+
+VALID_JOB_TYPES = {JOB_TYPE_ALARM, JOB_TYPE_INTERVAL, JOB_TYPE_INDEX}
+
+# ── Job Statuses ──────────────────────────────────────────────────────────
+
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_RUNNING = "running"
+JOB_STATUS_PAUSED = "paused"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
+
+# ── Default Settings ──────────────────────────────────────────────────────
+
+DEFAULT_INTERVAL_HOURS = 4
+SCHEDULE_EVERY_HOURS = 4
+
+# ── Categories ────────────────────────────────────────────────────────────
+# Maps display name → {topic_category (for main.py), category_id (for API)}
 
 CATEGORY_MAP = {
-    "Business": {
+    "Politics": {
+        "topic_category": "politics",
         "category_id": "6a22e0741f748391e98c6bad",
-        "topic_category": "business",
     },
     "Sports": {
-        "category_id": "6a22e0741f748391e98c6baf",
         "topic_category": "sports",
+        "category_id": "6a22e0741f748391e98c6baf",
     },
-    "Tech": {
-        "category_id": "6a22e0751f748391e98c6bb1",
-        "topic_category": "tech",
+    "Technology": {
+        "topic_category": "technology",
+        "category_id": "6a22e0741f748391e98c6bae",
     },
-    "Stock market": {
-        "category_id": "6a22e0751f748391e98c6bb3",
-        "topic_category": "stock market",
+    "Business & Finance": {
+        "topic_category": "business",
+        "category_id": "6a22e0741f748391e98c6bab",
     },
     "Travel": {
-        "category_id": "6a22e0751f748391e98c6bb5",
         "topic_category": "travel",
+        "category_id": "6a22e0741f748391e98c6bac",
     },
 }
 
-SCHEDULE_EVERY_HOURS = 4
+ALL_CATEGORIES_LABEL = "All Categories"
 
-COUNTRIES = [
-    "US",
-    "IN",
-    "UK"
-]
+# ── Countries ─────────────────────────────────────────────────────────────
 
-------------------------------------------------------
-app/scheduler_runner.py
+COUNTRIES = {
+    "US": "United States",
+    "IN": "India",
+    "GB": "United Kingdom",
+    "CA": "Canada",
+    "AU": "Australia",
+}
+
+# ── WordPress Statuses ────────────────────────────────────────────────────
+
+WORDPRESS_STATUSES = ["draft", "publish"]
+--------------------------------------------------------------------------------
+
+
+
+
+
+--------------------------------------app/scheduler_db_base.py------------------------------------------
+"""
+Abstract base class for the scheduler database backends.
+
+Every backend (SQLite, MongoDB, etc.) must implement this interface.
+The factory in scheduler_db.py will instantiate the correct one based
+on db_config.json and re-export all methods so callers never change.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Optional
+
+
+class SchedulerDBBase(ABC):
+    """Contract for scheduler database operations."""
+
+    # ── Schema / Init ─────────────────────────────────────────────────
+
+    @abstractmethod
+    def init_db(self) -> None:
+        """Create tables/collections if they do not exist."""
+        ...
+
+    # ── Jobs CRUD ─────────────────────────────────────────────────────
+
+    @abstractmethod
+    def create_job(self, data: dict) -> dict:
+        """Insert a new job and return the full row/document."""
+        ...
+
+    @abstractmethod
+    def get_all_jobs(self) -> list[dict]:
+        """Return all jobs, newest first."""
+        ...
+
+    @abstractmethod
+    def get_job(self, job_id: int) -> Optional[dict]:
+        """Return one job by ID."""
+        ...
+
+    @abstractmethod
+    def update_job(self, job_id: int, data: dict) -> Optional[dict]:
+        """Update selected fields of a job.  Recalculates next_run_at
+        when schedule-relevant fields change."""
+        ...
+
+    @abstractmethod
+    def soft_delete_job(self, job_id: int) -> bool:
+        """Soft-delete a job by setting status to cancelled."""
+        ...
+
+    @abstractmethod
+    def hard_delete_job(self, job_id: int) -> bool:
+        """Permanently remove a job and its execution history."""
+        ...
+
+    @abstractmethod
+    def get_pending_due_jobs(self) -> list[dict]:
+        """Return pending jobs whose next_run_at has passed."""
+        ...
+
+    # ── Execution History ─────────────────────────────────────────────
+
+    @abstractmethod
+    def create_history_entry(self, data: dict) -> dict:
+        """Insert a new execution_history row/document."""
+        ...
+
+    @abstractmethod
+    def update_history_entry(self, history_id: int, data: dict) -> Optional[dict]:
+        """Update selected fields of an execution_history row/document."""
+        ...
+
+    @abstractmethod
+    def get_history(self, job_id: Optional[int] = None, limit: int = 50) -> list[dict]:
+        """Return execution history rows, optionally filtered by job_id."""
+        ...
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+-------------------------------------app/scheduler_db_mongo.py-------------------------------------------
+"""
+MongoDB database backend for the Trend Agent Scheduler.
+
+Uses ``MongoEngine`` from ``app.mongo_engine`` for all connection
+management, auto-creation, and CRUD operations.  This file only
+contains the *scheduler-specific* logic (field defaults, recalc,
+status transitions) and delegates storage to the engine.
+
+Mirrors the exact same interface as SQLiteBackend so the factory
+can swap transparently.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Optional
+
+from app.mongo_engine import MongoEngine
+from app.scheduler_db_base import SchedulerDBBase
+from app.scheduler_config import (
+    DEFAULT_INTERVAL_HOURS,
+    JOB_TYPE_INTERVAL,
+    JOB_TYPE_ALARM,
+    JOB_STATUS_PENDING,
+)
+
+
+class MongoBackend(SchedulerDBBase):
+    """MongoDB implementation of the scheduler database."""
+
+    def __init__(
+        self,
+        mongo_uri: str | None = None,
+        db_name: str = "trend_scheduler",
+        jobs_collection: str = "scheduler_jobs",
+        history_collection: str = "execution_history",
+    ) -> None:
+        self._engine = MongoEngine.instance(mongo_uri=mongo_uri, db_name=db_name)
+        self._jobs_col = jobs_collection
+        self._history_col = history_collection
+
+    # ── Schema / Init ─────────────────────────────────────────────────
+
+    def init_db(self) -> None:
+        """Create collections and indexes if they do not exist."""
+        self._engine.ensure_collections()
+
+    # ── Jobs CRUD ─────────────────────────────────────────────────────
+
+    def create_job(self, data: dict) -> dict:
+        now = datetime.now().isoformat()
+        job_type = data.get("job_type", JOB_TYPE_INTERVAL)
+
+        next_run_at: Optional[str] = None
+        if job_type == JOB_TYPE_INTERVAL:
+            hours = int(data.get("interval_hours", DEFAULT_INTERVAL_HOURS))
+            next_run_at = (datetime.now() + timedelta(hours=hours)).isoformat()
+        elif job_type == JOB_TYPE_ALARM:
+            run_at = data.get("run_at")
+            if run_at:
+                next_run_at = run_at
+
+        doc = {
+            "id": self._engine.next_id(self._jobs_col),
+            "name": data.get("name", "Untitled Job"),
+            "job_type": job_type,
+            "run_at": data.get("run_at"),
+            "interval_hours": data.get("interval_hours", DEFAULT_INTERVAL_HOURS),
+            "country": data.get("country", "US"),
+            "category_name": data.get("category_name", "Sports"),
+            "topic_category": data.get("topic_category", "sports"),
+            "category_id": data.get("category_id", ""),
+            "wordpress_status": data.get("wordpress_status", "draft"),
+            "status": data.get("status", JOB_STATUS_PENDING),
+            "created_at": now,
+            "updated_at": now,
+            "last_run_at": None,
+            "next_run_at": next_run_at,
+            "error_message": None,
+        }
+
+        return self._engine.insert(self._jobs_col, doc)
+
+    def get_all_jobs(self) -> list[dict]:
+        return self._engine.find_many(
+            self._jobs_col,
+            sort=[("created_at", -1)],
+        )
+
+    def get_job(self, job_id: int) -> Optional[dict]:
+        return self._engine.find_one(self._jobs_col, {"id": job_id})
+
+    def update_job(self, job_id: int, data: dict) -> Optional[dict]:
+        now = datetime.now().isoformat()
+
+        allowed = {
+            "name", "job_type", "run_at", "interval_hours", "country",
+            "category_name", "topic_category", "category_id", "wordpress_status",
+            "status", "last_run_at", "next_run_at", "error_message",
+        }
+
+        updates: dict = {"updated_at": now}
+        for key in allowed:
+            if key in data:
+                updates[key] = data[key]
+
+        # Recalculate next_run_at when schedule-relevant fields change
+        need_recalc = {"job_type", "run_at", "interval_hours", "status"}
+        if need_recalc & set(data.keys()):
+            job = self.get_job(job_id)
+            if job:
+                jt = data.get("job_type", job["job_type"])
+                st = data.get("status", job["status"])
+
+                if st == JOB_STATUS_PENDING:
+                    if jt == JOB_TYPE_INTERVAL:
+                        hrs = int(data.get("interval_hours", job.get("interval_hours", 4)))
+                        updates["next_run_at"] = (
+                            datetime.now() + timedelta(hours=hrs)
+                        ).isoformat()
+                    elif jt == JOB_TYPE_ALARM:
+                        run_at = data.get("run_at", job.get("run_at"))
+                        if run_at:
+                            updates["next_run_at"] = run_at
+
+        return self._engine.update_one(self._jobs_col, {"id": job_id}, updates)
+
+    def soft_delete_job(self, job_id: int) -> bool:
+        now = datetime.now().isoformat()
+        self._engine.update_one(
+            self._jobs_col,
+            {"id": job_id},
+            {"status": "cancelled", "updated_at": now},
+        )
+        return True
+
+    def hard_delete_job(self, job_id: int) -> bool:
+        self._engine.delete_many(self._history_col, {"job_id": job_id})
+        self._engine.delete_one(self._jobs_col, {"id": job_id})
+        return True
+
+    def get_pending_due_jobs(self) -> list[dict]:
+        now = datetime.now().isoformat()
+        return self._engine.find_many(
+            self._jobs_col,
+            {
+                "status": JOB_STATUS_PENDING,
+                "next_run_at": {"$lte": now},
+            },
+        )
+
+    # ── Execution History ─────────────────────────────────────────────
+
+    def create_history_entry(self, data: dict) -> dict:
+        doc = {
+            "id": self._engine.next_id(self._history_col),
+            "job_id": data["job_id"],
+            "started_at": data["started_at"],
+            "finished_at": None,
+            "status": data.get("status", "running"),
+            "trigger_type": data.get("trigger_type", "scheduler"),
+            "run_id": None,
+            "html_path": None,
+            "publish_status": "pending",
+            "error_message": None,
+        }
+
+        return self._engine.insert(self._history_col, doc)
+
+    def update_history_entry(self, history_id: int, data: dict) -> Optional[dict]:
+        allowed = {
+            "finished_at", "status", "run_id", "html_path",
+            "publish_status", "error_message",
+        }
+        updates = {k: v for k, v in data.items() if k in allowed}
+        if not updates:
+            return None
+
+        return self._engine.update_one(
+            self._history_col, {"id": history_id}, updates
+        )
+
+    def get_history(self, job_id: Optional[int] = None, limit: int = 50) -> list[dict]:
+        query: dict = {}
+        if job_id:
+            query["job_id"] = job_id
+
+        return self._engine.find_many(
+            self._history_col,
+            query,
+            sort=[("started_at", -1)],
+            limit=limit,
+        )
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+--------------------------------------app/scheduler_db_sqlit.py------------------------------------------
+"""
+SQLite database backend for the Trend Agent Scheduler.
+
+Extracted from the original scheduler_db.py — same logic, now wrapped
+in the SchedulerDBBase interface so it can be swapped via the factory.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from app.scheduler_db_base import SchedulerDBBase
+from app.scheduler_config import (
+    DEFAULT_INTERVAL_HOURS,
+    JOB_TYPE_INTERVAL,
+    JOB_TYPE_ALARM,
+    JOB_STATUS_PENDING,
+)
+
+
+class SQLiteBackend(SchedulerDBBase):
+    """SQLite implementation of the scheduler database."""
+
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            project_root = Path(__file__).resolve().parent.parent
+            db_path = project_root / "app" / "scheduler.db"
+        self.db_path = Path(db_path)
+
+    # ── Connection ────────────────────────────────────────────────────
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    # ── Schema ────────────────────────────────────────────────────────
+
+    def init_db(self) -> None:
+        conn = self._get_connection()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS scheduler_jobs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT    NOT NULL,
+                job_type        TEXT    NOT NULL CHECK(job_type IN ('alarm','interval')),
+                run_at          TEXT,
+                interval_hours  INTEGER DEFAULT 4,
+                country         TEXT    NOT NULL DEFAULT 'US',
+                category_name   TEXT    NOT NULL DEFAULT 'Sports',
+                topic_category  TEXT    NOT NULL DEFAULT 'sports',
+                category_id     TEXT    DEFAULT '',
+                wordpress_status TEXT   NOT NULL DEFAULT 'draft',
+                status          TEXT    NOT NULL DEFAULT 'pending'
+                                  CHECK(status IN ('pending','running','paused','completed','failed','cancelled')),
+                created_at      TEXT    NOT NULL,
+                updated_at      TEXT    NOT NULL,
+                last_run_at     TEXT,
+                next_run_at     TEXT,
+                error_message   TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id          INTEGER NOT NULL,
+                started_at      TEXT    NOT NULL,
+                finished_at     TEXT,
+                status          TEXT    NOT NULL DEFAULT 'running'
+                                  CHECK(status IN ('running','success','failed')),
+                trigger_type    TEXT    NOT NULL DEFAULT 'scheduler'
+                                  CHECK(trigger_type IN ('scheduler','manual')),
+                run_id          TEXT,
+                html_path       TEXT,
+                publish_status  TEXT    DEFAULT 'pending'
+                                  CHECK(publish_status IN ('pending','success','failed','skipped')),
+                error_message   TEXT,
+                FOREIGN KEY (job_id) REFERENCES scheduler_jobs(id)
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+    # ── Jobs CRUD ─────────────────────────────────────────────────────
+
+    def create_job(self, data: dict) -> dict:
+        now = datetime.now().isoformat()
+        job_type = data.get("job_type", JOB_TYPE_INTERVAL)
+
+        next_run_at: Optional[str] = None
+        if job_type == JOB_TYPE_INTERVAL:
+            hours = int(data.get("interval_hours", DEFAULT_INTERVAL_HOURS))
+            next_run_at = (datetime.now() + timedelta(hours=hours)).isoformat()
+        elif job_type == JOB_TYPE_ALARM:
+            run_at = data.get("run_at")
+            if run_at:
+                next_run_at = run_at
+
+        conn = self._get_connection()
+        cur = conn.execute("""
+            INSERT INTO scheduler_jobs
+                (name, job_type, run_at, interval_hours, country,
+                 category_name, topic_category, category_id, wordpress_status,
+                 status, created_at, updated_at, next_run_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            data.get("name", "Untitled Job"),
+            job_type,
+            data.get("run_at"),
+            data.get("interval_hours", DEFAULT_INTERVAL_HOURS),
+            data.get("country", "US"),
+            data.get("category_name", "Sports"),
+            data.get("topic_category", "sports"),
+            data.get("category_id", ""),
+            data.get("wordpress_status", "draft"),
+            data.get("status", JOB_STATUS_PENDING),
+            now,
+            now,
+            next_run_at,
+        ))
+        job_id = cur.lastrowid
+        conn.commit()
+        row = conn.execute("SELECT * FROM scheduler_jobs WHERE id=?", (job_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else {}
+
+    def get_all_jobs(self) -> list[dict]:
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT * FROM scheduler_jobs ORDER BY created_at DESC"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_job(self, job_id: int) -> Optional[dict]:
+        conn = self._get_connection()
+        row = conn.execute("SELECT * FROM scheduler_jobs WHERE id=?", (job_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def update_job(self, job_id: int, data: dict) -> Optional[dict]:
+        now = datetime.now().isoformat()
+
+        allowed = {
+            "name", "job_type", "run_at", "interval_hours", "country",
+            "category_name", "topic_category", "category_id", "wordpress_status",
+            "status", "last_run_at", "next_run_at", "error_message",
+        }
+
+        updates: dict = {"updated_at": now}
+        for key in allowed:
+            if key in data:
+                updates[key] = data[key]
+
+        need_recalc = {"job_type", "run_at", "interval_hours", "status"}
+        if need_recalc & set(data.keys()):
+            job = self.get_job(job_id)
+            if job:
+                jt = data.get("job_type", job["job_type"])
+                st = data.get("status", job["status"])
+
+                if st == JOB_STATUS_PENDING:
+                    if jt == JOB_TYPE_INTERVAL:
+                        hrs = int(data.get("interval_hours", job.get("interval_hours", 4)))
+                        updates["next_run_at"] = (
+                            datetime.now() + timedelta(hours=hrs)
+                        ).isoformat()
+                    elif jt == JOB_TYPE_ALARM:
+                        run_at = data.get("run_at", job.get("run_at"))
+                        if run_at:
+                            updates["next_run_at"] = run_at
+
+        set_clause = ", ".join(f"{k}=?" for k in updates)
+        values = list(updates.values()) + [job_id]
+
+        conn = self._get_connection()
+        conn.execute(f"UPDATE scheduler_jobs SET {set_clause} WHERE id=?", values)
+        conn.commit()
+        row = conn.execute("SELECT * FROM scheduler_jobs WHERE id=?", (job_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def soft_delete_job(self, job_id: int) -> bool:
+        now = datetime.now().isoformat()
+        conn = self._get_connection()
+        conn.execute(
+            "UPDATE scheduler_jobs SET status='cancelled', updated_at=? WHERE id=?",
+            (now, job_id),
+        )
+        conn.commit()
+        conn.close()
+        return True
+
+    def hard_delete_job(self, job_id: int) -> bool:
+        conn = self._get_connection()
+        conn.execute("DELETE FROM execution_history WHERE job_id=?", (job_id,))
+        conn.execute("DELETE FROM scheduler_jobs WHERE id=?", (job_id,))
+        conn.commit()
+        conn.close()
+        return True
+
+    def get_pending_due_jobs(self) -> list[dict]:
+        now = datetime.now().isoformat()
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT * FROM scheduler_jobs WHERE status='pending' AND next_run_at<=?",
+            (now,),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    # ── Execution History ─────────────────────────────────────────────
+
+    def create_history_entry(self, data: dict) -> dict:
+        conn = self._get_connection()
+        cur = conn.execute("""
+            INSERT INTO execution_history
+                (job_id, started_at, status, trigger_type)
+            VALUES (?,?,?,?)
+        """, (
+            data["job_id"],
+            data["started_at"],
+            data.get("status", "running"),
+            data.get("trigger_type", "scheduler"),
+        ))
+        hid = cur.lastrowid
+        conn.commit()
+        row = conn.execute("SELECT * FROM execution_history WHERE id=?", (hid,)).fetchone()
+        conn.close()
+        return dict(row) if row else {}
+
+    def update_history_entry(self, history_id: int, data: dict) -> Optional[dict]:
+        allowed = {
+            "finished_at", "status", "run_id", "html_path",
+            "publish_status", "error_message",
+        }
+        updates = {k: v for k, v in data.items() if k in allowed}
+        if not updates:
+            return None
+
+        set_clause = ", ".join(f"{k}=?" for k in updates)
+        values = list(updates.values()) + [history_id]
+
+        conn = self._get_connection()
+        conn.execute(f"UPDATE execution_history SET {set_clause} WHERE id=?", values)
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM execution_history WHERE id=?", (history_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def get_history(self, job_id: Optional[int] = None, limit: int = 50) -> list[dict]:
+        conn = self._get_connection()
+        if job_id:
+            rows = conn.execute(
+                "SELECT * FROM execution_history WHERE job_id=? ORDER BY started_at DESC LIMIT ?",
+                (job_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM execution_history ORDER BY started_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+--------------------------------------------------------------------------------
+
+
+
+
+------------------------------------app/scheduler_db.py--------------------------------------------
+"""
+Database factory for the Trend Agent Scheduler.
+
+Reads ``app/db_config.json`` to decide which backend to use
+(sqlite or mongo) and re-exports every function from that backend
+so that existing code like::
+
+    from app.scheduler_db import create_job, get_all_jobs, …
+
+continues to work with zero changes.
+
+Switch backends by editing db_config.json::
+
+    { "db_backend": "sqlite" }   ← default
+    { "db_backend": "mongo" }    ← uses MONGO_URI from .env
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+# ── Load config ──────────────────────────────────────────────────────────
+
+_CONFIG_PATH = Path(__file__).resolve().parent / "db_config.json"
+
+
+def _load_db_config() -> dict:
+    if _CONFIG_PATH.exists():
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # Default to sqlite if config file is missing
+    return {"db_backend": "sqlite"}
+
+
+_db_config = _load_db_config()
+_BACKEND_NAME = _db_config.get("db_backend", "sqlite").lower()
+
+
+# ── Instantiate backend ──────────────────────────────────────────────────
+
+def _create_backend():
+    """Create and return the appropriate backend instance."""
+    if _BACKEND_NAME == "mongo":
+        from app.scheduler_db_mongo import MongoBackend
+        mongo_cfg = _db_config.get("mongo", {})
+        return MongoBackend(
+            db_name=mongo_cfg.get("db_name", "trend_scheduler"),
+            jobs_collection=mongo_cfg.get("jobs_collection", "scheduler_jobs"),
+            history_collection=mongo_cfg.get("history_collection", "execution_history"),
+        )
+    else:
+        from app.scheduler_db_sqlite import SQLiteBackend
+        sqlite_cfg = _db_config.get("sqlite", {})
+        db_path = sqlite_cfg.get("db_path")
+        return SQLiteBackend(db_path=db_path)
+
+
+_backend = _create_backend()
+
+
+# ── Re-export all functions ──────────────────────────────────────────────
+# Every consumer does:  from app.scheduler_db import create_job, ...
+# This keeps that working regardless of backend.
+
+def init_db() -> None:
+    """Create tables/collections if they do not exist."""
+    _backend.init_db()
+
+
+def create_job(data: dict) -> dict:
+    """Insert a new job and return the full row/document."""
+    return _backend.create_job(data)
+
+
+def get_all_jobs() -> list[dict]:
+    """Return all jobs, newest first."""
+    return _backend.get_all_jobs()
+
+
+def get_job(job_id: int) -> Optional[dict]:
+    """Return one job by ID."""
+    return _backend.get_job(job_id)
+
+
+def update_job(job_id: int, data: dict) -> Optional[dict]:
+    """Update selected fields of a job."""
+    return _backend.update_job(job_id, data)
+
+
+def soft_delete_job(job_id: int) -> bool:
+    """Soft-delete a job by setting status to cancelled."""
+    return _backend.soft_delete_job(job_id)
+
+
+def hard_delete_job(job_id: int) -> bool:
+    """Permanently remove a job and its execution history."""
+    return _backend.hard_delete_job(job_id)
+
+
+def get_pending_due_jobs() -> list[dict]:
+    """Return pending jobs whose next_run_at has passed."""
+    return _backend.get_pending_due_jobs()
+
+
+def create_history_entry(data: dict) -> dict:
+    """Insert a new execution_history row/document."""
+    return _backend.create_history_entry(data)
+
+
+def update_history_entry(history_id: int, data: dict) -> Optional[dict]:
+    """Update selected fields of an execution_history row/document."""
+    return _backend.update_history_entry(history_id, data)
+
+
+def get_history(job_id: Optional[int] = None, limit: int = 50) -> list[dict]:
+    """Return execution history rows, optionally filtered by job_id."""
+    return _backend.get_history(job_id=job_id, limit=limit)
+
+
+# ── Convenience ──────────────────────────────────────────────────────────
+
+def get_backend_name() -> str:
+    """Return the active backend name ('sqlite' or 'mongo')."""
+    return _BACKEND_NAME
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+
+-------------------------------------app/scheduler_runner.py-------------------------------------------
 import json
 from pathlib import Path
 import re
@@ -946,13 +4866,550 @@ def update_scheduler():
 
 def start_scheduler():
     update_scheduler()
+--------------------------------------------------------------------------------
 
-------------------------------------------------------
-app/scheduler_status.json
+
+
+
+
+----------------------------------------app/scheduler_service.py----------------------------------------
+"""
+Background scheduler service for the Trend Agent.
+
+Runs as a daemon thread, continuously polling the database for due jobs.
+Executes main.py and publish_local_html.py via subprocess — never imports
+from news_agent.
+
+CHANGES FROM ORIGINAL:
+  - After each pipeline run, calls CloudSync.sync_run() to upload
+    artifacts to Backblaze B2 and save metadata to MongoDB.
+  - Uses CloudSync.get_html_content() instead of _find_generated_html()
+    to locate HTML files (local-first, B2 fallback).
+  - Uses CloudSync for scheduler status instead of scheduler_status.json.
+  - Marks blog_metadata as published after successful publish.
+
+When a job's category is "All Categories", it runs all 5 categories
+sequentially (Politics, Sports, Technology, Business & Finance, Travel),
+each with its own main.py call and publish step with the correct category_id.
+
+Scheduler loop (every 30 s):
+    get_pending_due_jobs() → execute each → update status / next_run_at
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from app.scheduler_config import (
+    CATEGORY_MAP,
+    DEFAULT_INTERVAL_HOURS,
+    ALL_CATEGORIES_LABEL,
+    JOB_TYPE_INTERVAL,
+    JOB_TYPE_ALARM,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PAUSED,
+)
+from app.scheduler_db import (
+    init_db,
+    get_pending_due_jobs,
+    get_job,
+    update_job,
+    create_history_entry,
+    update_history_entry,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MAIN_PY = PROJECT_ROOT / "main.py"
+PUBLISH_SCRIPT = PROJECT_ROOT / "app" / "publish_local_html.py"
+
+# ── Concurrency guard ────────────────────────────────────────────────────
+_running_jobs: set[int] = set()
+_running_lock = threading.Lock()
+
+_scheduler_thread: threading.Thread | None = None
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+def _now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+def _extract_run_id(stdout: str) -> str | None:
+    if not stdout:
+        return None
+    try:
+        data = json.loads(stdout.strip().splitlines()[-1])
+        return data.get("run_id")
+    except (json.JSONDecodeError, IndexError):
+        pass
+    m = re.search(r'"run_id"\s*:\s*"([^"]+)"', stdout)
+    return m.group(1) if m else None
+
+
+# ── CloudSync lazy loader ────────────────────────────────────────────────
+# We don't import CloudSync at module level because it depends on
+# B2/MongoDB engines which may not be configured yet.  Instead we
+# load it lazily and gracefully degrade if cloud is not available.
+
+_sync = None
+
+
+def _get_sync():
+    """Lazily get the CloudSync singleton."""
+    global _sync
+    if _sync is None:
+        try:
+            from app.cloud_sync import CloudSync
+            _sync = CloudSync.instance()
+        except Exception as exc:
+            print(f"CloudSync not available (cloud features disabled): {exc}")
+            _sync = False  # Sentinel: tried and failed
+    return _sync if _sync is not False else None
+
+
+def _find_generated_html(run_id: str) -> Path | None:
+    """
+    Find generated HTML for a run_id.
+
+    Tries local filesystem first (same container, fast), then falls
+    back to CloudSync which checks MongoDB metadata + Backblaze B2.
+    """
+    # ── Local filesystem check ───────────────────────────────────────
+    blogs_dir = PROJECT_ROOT / "storage" / "blogs"
+    if blogs_dir.exists():
+        candidates = sorted(
+            blogs_dir.glob(f"*-{run_id}.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+
+    # ── CloudSync fallback ───────────────────────────────────────────
+    sync = _get_sync()
+    if sync:
+        html_content = sync.get_html_content(run_id)
+        if html_content:
+            # Write to a temp file so publish_local_html.py can use it
+            temp_dir = PROJECT_ROOT / "storage" / "blogs"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = temp_dir / f"restored-{run_id}.html"
+            temp_path.write_text(html_content, encoding="utf-8")
+            return temp_path
+
+    return None
+
+
+# ── Publish ─────────────────────────────────────────────────────────────
+
+def _publish_html(
+    category_id: str,
+    wordpress_status: str,
+    html_path: Path,
+    history_id: int,
+) -> bool:
+    """
+    Publish an HTML file via publish_local_html.py.
+
+    Args:
+        category_id:       The PeopleNewsTime category ID for the POST request.
+        wordpress_status:  Draft or publish.
+        html_path:         Path to the generated HTML file.
+        history_id:        Execution history row to update.
+    """
+    if not category_id:
+        update_history_entry(history_id, {
+            "publish_status": "skipped",
+            "error_message": "category_id not configured",
+        })
+        return False
+
+    cmd = [
+        sys.executable,
+        str(PUBLISH_SCRIPT),
+        "--file", str(html_path),
+        "--category-id", category_id,
+        "--status", wordpress_status,
+    ]
+
+    print(f"\n{'='*60}\nPublishing: {' '.join(cmd)}\n{'='*60}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+
+    if result.stdout:
+        print("PUBLISH STDOUT:", result.stdout)
+    if result.stderr:
+        print("PUBLISH STDERR:", result.stderr)
+
+    if result.returncode != 0:
+        update_history_entry(history_id, {
+            "publish_status": "failed",
+            "html_path": str(html_path),
+            "error_message": f"publish script exit code {result.returncode}",
+        })
+        return False
+
+    update_history_entry(history_id, {
+        "publish_status": "success",
+        "html_path": str(html_path),
+    })
+    return True
+
+
+# ── Run one category ────────────────────────────────────────────────────
+
+def _run_single_category(
+    job: dict,
+    cat_name: str,
+    cat_info: dict,
+    trigger_type: str,
+) -> bool:
+    """
+    Run main.py for a single category, sync to cloud, and publish.
+
+    Args:
+        job:          The job row from the database.
+        cat_name:     Display name (e.g. "Sports").
+        cat_info:     Dict with topic_category and category_id.
+        trigger_type: 'scheduler' or 'manual'.
+
+    Returns:
+        True if main.py succeeded (even if publish was skipped).
+    """
+    country = str(job.get("country", "US"))
+    topic_cat = cat_info["topic_category"]
+    category_id = cat_info["category_id"]
+    wp_status = str(job.get("wordpress_status", "draft"))
+    job_id = job["id"]
+
+    now = _now_iso()
+
+    # ── Create execution history row for this category ────────────────
+    hist = create_history_entry({
+        "job_id": job_id,
+        "started_at": now,
+        "status": "running",
+        "trigger_type": trigger_type,
+    })
+    hist_id = hist.get("id")
+
+    try:
+        # ── Run main.py ───────────────────────────────────────────────
+        cmd = [
+            sys.executable,
+            str(MAIN_PY),
+            "--country", country,
+            "--topic-category", topic_cat,
+            "--wordpress-sync",
+            "--wordpress-status", wp_status,
+            "--trigger", trigger_type,
+        ]
+
+        print(f"\n{'='*60}")
+        print(f"Job #{job_id} '{job['name']}' — category: {cat_name}")
+        print(f"  {' '.join(cmd)}")
+        print(f"  cwd={PROJECT_ROOT}")
+        print(f"{'='*60}")
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        )
+
+        if result.stdout:
+            print("MAIN STDOUT:", result.stdout)
+        if result.stderr:
+            print("MAIN STDERR:", result.stderr)
+
+        # ── main.py failed ────────────────────────────────────────────
+        if result.returncode != 0:
+            err = f"main.py exit code {result.returncode}"
+            print(f"[{cat_name}] {err}")
+            update_history_entry(hist_id, {
+                "finished_at": _now_iso(),
+                "status": "failed",
+                "error_message": err,
+            })
+            return False
+
+        # ── main.py succeeded ─────────────────────────────────────────
+        run_id = _extract_run_id(result.stdout or "")
+        update_history_entry(hist_id, {
+            "finished_at": _now_iso(),
+            "status": "success",
+            "run_id": run_id,
+        })
+
+        # ── Sync artifacts to cloud (B2 + MongoDB) ─────────────────────
+        if run_id:
+            sync = _get_sync()
+            if sync:
+                try:
+                    sync_result = sync.sync_run(
+                        run_id=run_id,
+                        topic=None,  # Not easily available here; metadata handles it
+                        job_id=job_id,
+                        category=topic_cat,
+                    )
+                    print(f"[CloudSync] Run {run_id} synced: "
+                          f"html={bool(sync_result.get('html'))}, "
+                          f"md={bool(sync_result.get('md'))}, "
+                          f"images={len(sync_result.get('images', []))}, "
+                          f"cloud={sync_result.get('cloud_enabled')}")
+                except Exception as exc:
+                    print(f"[CloudSync] Sync failed for run {run_id}: {exc}")
+                    # Non-fatal — local files still work
+
+        # ── Try to publish ────────────────────────────────────────────
+        if run_id:
+            html_path = _find_generated_html(run_id)
+            if html_path:
+                publish_ok = _publish_html(category_id, wp_status, html_path, hist_id)
+
+                # Mark as published in blog_metadata
+                if publish_ok:
+                    sync = _get_sync()
+                    if sync:
+                        try:
+                            sync.mark_published(run_id, publish_status="success")
+                        except Exception:
+                            pass  # Non-fatal
+            else:
+                update_history_entry(hist_id, {
+                    "publish_status": "skipped",
+                    "error_message": f"No HTML file for run_id={run_id}",
+                })
+        else:
+            update_history_entry(hist_id, {
+                "publish_status": "skipped",
+                "error_message": "Could not extract run_id from main.py output",
+            })
+
+        return True
+
+    except Exception as exc:
+        print(f"[{cat_name}] execution error: {exc}")
+        update_history_entry(hist_id, {
+            "finished_at": _now_iso(),
+            "status": "failed",
+            "error_message": str(exc),
+        })
+        return False
+
+
+# ── Execute one job ──────────────────────────────────────────────────────
+
+def execute_job(job_id: int, trigger_type: str = "scheduler") -> None:
+    """
+    Run a job. If category is "All Categories", runs all 5 categories
+    sequentially. Otherwise runs a single category.
+
+    Args:
+        job_id:       The database row ID.
+        trigger_type: 'scheduler' for auto-runs, 'manual' for Run Now.
+    """
+    # Prevent double-execution of the same job
+    with _running_lock:
+        if job_id in _running_jobs:
+            print(f"Job #{job_id} is already running — skipping")
+            return
+        _running_jobs.add(job_id)
+
+    job = get_job(job_id)
+    if not job:
+        with _running_lock:
+            _running_jobs.discard(job_id)
+        print(f"Job #{job_id} not found")
+        return
+
+    original_status = job.get("status", JOB_STATUS_PENDING)
+    now = _now_iso()
+
+    # ── Mark job as running ───────────────────────────────────────────
+    update_job(job_id, {
+        "status": JOB_STATUS_RUNNING,
+        "last_run_at": now,
+        "error_message": None,
+    })
+
+    try:
+        category_name = job.get("category_name", "Sports")
+
+        # ── All Categories mode: run each category one by one ─────────
+        if category_name == ALL_CATEGORIES_LABEL:
+            results: dict[str, bool] = {}
+            for cat_name, cat_info in CATEGORY_MAP.items():
+                print(f"\n>>> [{cat_name}] starting…")
+                ok = _run_single_category(job, cat_name, cat_info, trigger_type)
+                results[cat_name] = ok
+                status_word = "OK" if ok else "FAILED"
+                print(f">>> [{cat_name}] {status_word}")
+
+            all_ok = all(results.values())
+            if all_ok:
+                _finish_job(job_id, job, trigger_type, original_status, failed=False)
+            else:
+                failed_cats = [k for k, v in results.items() if not v]
+                _finish_job(
+                    job_id, job, trigger_type, original_status,
+                    failed=True,
+                    error=f"Failed categories: {', '.join(failed_cats)}",
+                )
+
+        # ── Single category mode ──────────────────────────────────────
+        else:
+            cat_info = CATEGORY_MAP.get(category_name, {
+                "topic_category": job.get("topic_category", "business"),
+                "category_id": job.get("category_id", ""),
+            })
+            ok = _run_single_category(job, category_name, cat_info, trigger_type)
+            _finish_job(
+                job_id, job, trigger_type, original_status,
+                failed=not ok,
+                error=None if ok else f"main.py failed for {category_name}",
+            )
+
+    except Exception as exc:
+        print(f"Job #{job_id} execution error: {exc}")
+        _finish_job(job_id, job, trigger_type, original_status,
+                    failed=True, error=str(exc))
+
+    finally:
+        with _running_lock:
+            _running_jobs.discard(job_id)
+
+
+# ── Finish job ──────────────────────────────────────────────────────────
+
+def _finish_job(
+    job_id: int,
+    job: dict,
+    trigger_type: str,
+    original_status: str,
+    *,
+    failed: bool = False,
+    error: str | None = None,
+) -> None:
+    """
+    Update job status after execution completes.
+
+    Rules:
+      - Manual run: restore the pre-run status (don't alter schedule).
+      - Scheduled alarm + success: status → completed.
+      - Scheduled interval: ALWAYS goes back to pending with next_run_at,
+        even if some categories failed. The error is logged but the
+        recurring schedule never stops.
+      - Scheduled alarm + failure: status → failed (one-time job, won't
+        retry automatically).
+    """
+    # ── Manual run: keep the original schedule intact ─────────────────
+    if trigger_type == "manual":
+        restore = original_status if original_status != JOB_STATUS_RUNNING else JOB_STATUS_PENDING
+        update_job(job_id, {
+            "status": restore,
+            "error_message": error,
+        })
+        return
+
+    jt = job.get("job_type", JOB_TYPE_INTERVAL)
+
+    # ── Recurring (interval) jobs: ALWAYS continue the schedule ───────
+    if jt == JOB_TYPE_INTERVAL:
+        hrs = int(job.get("interval_hours", DEFAULT_INTERVAL_HOURS))
+        next_run = (datetime.now() + timedelta(hours=hrs)).isoformat()
+        update_job(job_id, {
+            "status": JOB_STATUS_PENDING,
+            "next_run_at": next_run,
+            "error_message": error,
+        })
+        return
+
+    # ── Alarm (one-time) jobs ─────────────────────────────────────────
+    if failed:
+        update_job(job_id, {
+            "status": JOB_STATUS_FAILED,
+            "error_message": error,
+        })
+    else:
+        update_job(job_id, {
+            "status": JOB_STATUS_COMPLETED,
+            "error_message": None,
+        })
+
+
+# ── Background loop ──────────────────────────────────────────────────────
+
+def _scheduler_loop() -> None:
+    """Poll every 30 seconds for due jobs and execute them."""
+    while True:
+        try:
+            due = get_pending_due_jobs()
+            for job in due:
+                print(f"Scheduler: job #{job['id']} '{job['name']}' is due — executing")
+                execute_job(job["id"], trigger_type="scheduler")
+        except Exception as exc:
+            print(f"Scheduler loop error: {exc}")
+        time.sleep(30)
+
+
+def start_scheduler_service() -> None:
+    """Initialise the DB, cloud sync, and start the background scheduler thread."""
+    init_db()
+
+    # ── Initialize cloud sync (MongoDB collections + B2 buckets) ───────
+    try:
+        sync = _get_sync()
+        if sync:
+            # cloud_enabled check is lazy — this first access triggers
+            # the B2 connection test and prints diagnostic warnings
+            cloud_ok = sync.cloud_enabled
+            result = sync.initialize()
+            print(f"CloudSync initialized: {json.dumps(result, default=str)}")
+            if not cloud_ok:
+                print("=" * 60)
+                print("[CloudSync] B2 cloud storage is NOT active.")
+                print("  Files will be stored locally ONLY — lost on CI/CD redeploy.")
+                print("  To fix, set these in your .env:")
+                print("    B2_ENDPOINT_URL=https://s3.<region>.backblazeb2.com")
+                print("    B2_ACCESS_KEY_ID=<your-key-id>")
+                print("    B2_SECRET_ACCESS_KEY=<your-application-key>")
+                print("  Example:")
+                print("    B2_ENDPOINT_URL=https://s3.us-west-002.backblazeb2.com")
+                print("    B2_ACCESS_KEY_ID=0051...your-key-id...")
+                print("    B2_SECRET_ACCESS_KEY=K005...your-application-key...")
+                print("=" * 60)
+    except Exception as exc:
+        print(f"CloudSync initialization skipped: {exc}")
+
+    # ── Start scheduler thread ────────────────────────────────────────
+    global _scheduler_thread
+    if _scheduler_thread is None or not _scheduler_thread.is_alive():
+        _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
+        _scheduler_thread.start()
+        print("Scheduler service started (polling every 30 s)")
+--------------------------------------------------------------------------------
+
+
+
+
+---------------------------------------app/scheduler_status.json-----------------------------------------
 {
   "last_main_status": "failed",
-  "last_main_at": "2026-06-09T13:34:06.656380+00:00",
+  "last_main_at": "2026-06-10T11:32:57.031437+00:00",
   "last_error": "main.py exit code -2",
-  "last_api_status": "skipped"
+  "last_api_status": "skipped",
+  "scheduler_status": "running",
+  "scheduler_updated_at": "2026-06-10T11:32:32.002952+00:00",
+  "scheduler_interval_hours": 4
 }
-------------------------------------------------------
+--------------------------------------------------------------------------------

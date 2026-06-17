@@ -7,9 +7,27 @@
         "db_name": "trend_scheduler",
         "jobs_collection": "scheduler_jobs",
         "history_collection": "execution_history"
+    },
+    "backblaze": {
+        "enabled": true,
+        "endpoint_url_env": "B2_ENDPOINT_URL",
+        "access_key_id_env": "B2_ACCESS_KEY_ID",
+        "secret_access_key_env": "B2_SECRET_ACCESS_KEY",
+        "region_env": "B2_REGION",
+        "bucket_prefix_env": "B2_BUCKET_PREFIX",
+        "buckets": [
+            "trend-blogs",
+            "trend-images",
+            "trend-cache",
+            "trend-memory",
+            "trend-trends",
+            "trend-archives"
+        ]
+    },
+    "cloud_sync": {
+        "enabled": true
     }
 }
-
 
 
 {

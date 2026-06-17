@@ -7,5 +7,26 @@
         "db_name": "trend_scheduler",
         "jobs_collection": "scheduler_jobs",
         "history_collection": "execution_history"
+    },
+    "backblaze": {
+        "enabled": true,
+        "endpoint_url_env": "B2_ENDPOINT_URL",
+        "access_key_id_env": "B2_ACCESS_KEY_ID",
+        "secret_access_key_env": "B2_SECRET_ACCESS_KEY",
+        "region_env": "B2_REGION",
+        "bucket_name_env": "B2_BUCKET_NAME",
+        "default_bucket_name": "trend-agent",
+        "design": "single bucket + category prefixes (blogs/, images/, cache/, memory/, trends/, archives/)",
+        "categories": [
+            "blogs",
+            "images",
+            "cache",
+            "memory",
+            "trends",
+            "archives"
+        ]
+    },
+    "cloud_sync": {
+        "enabled": true
     }
 }

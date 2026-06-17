@@ -47,6 +47,7 @@ import os
 
 load_dotenv(override=True)  # Load .env variables into os.environ
 
+
 # ── Collection schema registry ───────────────────────────────────────────
 # Each entry declares the indexes that must exist for a collection.
 # The engine creates them in ``ensure_collections()``.
@@ -64,6 +65,36 @@ COLLECTION_SCHEMA: dict[str, list[dict]] = {
     ],
     "_counters": [
         # {"keys": [("_id", 1)], "unique": True, "name": "idx_counters_id"},
+    ],
+    # ── Blog metadata: tracks all generated articles across deploys ──
+    "blog_metadata": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_blog_meta_id"},
+        {"keys": [("run_id", 1)], "unique": True, "name": "idx_blog_meta_run_id"},
+        {"keys": [("topic", 1)], "name": "idx_blog_meta_topic"},
+        {"keys": [("status", 1)], "name": "idx_blog_meta_status"},
+        {"keys": [("created_at", -1)], "name": "idx_blog_meta_created"},
+    ],
+    # ── Scheduler status: replaces scheduler_status.json ─────────────
+    "scheduler_status": [
+        # {"keys": [("_id", 1)], "unique": True, "name": "idx_sched_status_id"},
+    ],
+    # ── Run cache: replaces storage/cache/*.json files ───────────────
+    "run_cache": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_run_cache_id"},
+        {"keys": [("run_id", 1)], "name": "idx_run_cache_run_id"},
+        {"keys": [("cache_type", 1)], "name": "idx_run_cache_type"},
+        {"keys": [("run_id", 1), ("cache_type", 1)], "name": "idx_run_cache_run_type"},
+    ],
+    # ── Published topics: dedup check across deploys ─────────────────
+    "published_topics": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_pub_topics_id"},
+        {"keys": [("topic", 1)], "name": "idx_pub_topics_topic"},
+        {"keys": [("published_at", -1)], "name": "idx_pub_topics_date"},
+    ],
+    # ── Editorial memory: replaces storage/memory/editorial_memory.jsonl
+    "editorial_memory": [
+        {"keys": [("id", 1)], "unique": True, "name": "idx_ed_mem_id"},
+        {"keys": [("created_at", -1)], "name": "idx_ed_mem_created"},
     ],
 }
 

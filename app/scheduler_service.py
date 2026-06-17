@@ -5,16 +5,17 @@ Runs as a daemon thread, continuously polling the database for due jobs.
 Executes main.py and publish_local_html.py via subprocess — never imports
 from news_agent.
 
-Three job types:
-  - alarm:   Run once at a specific time
-  - interval: Run every N hours (article generation)
-  - index:    Crawl sitemap → embed → store (background indexing)
+CHANGES FROM ORIGINAL:
+  - After each pipeline run, calls CloudSync.sync_run() to upload
+    artifacts to Backblaze B2 and save metadata to MongoDB.
+  - Uses CloudSync.get_html_content() instead of _find_generated_html()
+    to locate HTML files (local-first, B2 fallback).
+  - Uses CloudSync for scheduler status instead of scheduler_status.json.
+  - Marks blog_metadata as published after successful publish.
 
 When a job's category is "All Categories", it runs all 5 categories
 sequentially (Politics, Sports, Technology, Business & Finance, Travel),
 each with its own main.py call and publish step with the correct category_id.
-
-Index jobs run: python main.py --index
 
 Scheduler loop (every 30 s):
     get_pending_due_jobs() → execute each → update status / next_run_at
@@ -23,7 +24,6 @@ Scheduler loop (every 30 s):
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -36,9 +36,8 @@ from app.scheduler_config import (
     CATEGORY_MAP,
     DEFAULT_INTERVAL_HOURS,
     ALL_CATEGORIES_LABEL,
-    JOB_TYPE_ALARM,
     JOB_TYPE_INTERVAL,
-    JOB_TYPE_INDEX,
+    JOB_TYPE_ALARM,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JOB_STATUS_COMPLETED,
@@ -83,118 +82,58 @@ def _extract_run_id(stdout: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _find_generated_html(run_id: str) -> Path | None:
-    blogs_dir = PROJECT_ROOT / "storage" / "blogs"
-    if not blogs_dir.exists():
-        return None
-    candidates = sorted(
-        blogs_dir.glob(f"*-{run_id}.html"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
+# ── CloudSync lazy loader ────────────────────────────────────────────────
+# We don't import CloudSync at module level because it depends on
+# B2/MongoDB engines which may not be configured yet.  Instead we
+# load it lazily and gracefully degrade if cloud is not available.
+
+_sync = None
 
 
-# ── Indexing ────────────────────────────────────────────────────────────
-
-def _run_indexing(job: dict, trigger_type: str) -> bool:
-    """
-    Run the indexing service to crawl sitemap and populate the vector store.
-
-    This runs: python main.py --index
-
-    The sitemap URL and tenant ID come from environment variables
-    (NEWS_AGENT_SITEMAP_URL, NEWS_AGENT_TENANT_ID) which are loaded
-    from .env by the config module.
-
-    Returns True if indexing succeeded.
-    """
-    job_id = job["id"]
-    now = _now_iso()
-
-    # ── Create execution history row ─────────────────────────────────
-    hist = create_history_entry({
-        "job_id": job_id,
-        "started_at": now,
-        "status": "running",
-        "trigger_type": trigger_type,
-    })
-    hist_id = hist.get("id")
-
-    try:
-        cmd = [
-            sys.executable,
-            str(MAIN_PY),
-            "--index",
-        ]
-
-        # Pass sitemap URL if the job has one stored (for multi-tenant)
-        # Otherwise it comes from .env / config
-        sitemap_url = job.get("sitemap_url") or os.getenv("NEWS_AGENT_SITEMAP_URL", "")
-        if sitemap_url:
-            cmd.extend(["--sitemap-url", sitemap_url])
-
-        tenant_id = job.get("tenant_id") or os.getenv("NEWS_AGENT_TENANT_ID", "")
-        if tenant_id:
-            cmd.extend(["--tenant-id", tenant_id])
-
-        vector_store = os.getenv("NEWS_AGENT_VECTOR_STORE_TYPE", "json")
-        if vector_store:
-            cmd.extend(["--vector-store", vector_store])
-
-        print(f"\n{'='*60}")
-        print(f"Job #{job_id} '{job['name']}' — INDEXING")
-        print(f"  {' '.join(cmd)}")
-        print(f"  cwd={PROJECT_ROOT}")
-        print(f"{'='*60}")
-
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT),
-        )
-
-        if result.stdout:
-            print("INDEX STDOUT:", result.stdout)
-        if result.stderr:
-            print("INDEX STDERR:", result.stderr)
-
-        if result.returncode != 0:
-            err = f"Indexing exit code {result.returncode}"
-            print(f"[INDEX] {err}")
-            update_history_entry(hist_id, {
-                "finished_at": _now_iso(),
-                "status": "failed",
-                "error_message": err,
-            })
-            return False
-
-        # ── Parse indexing result ────────────────────────────────────
-        indexed_count = None
+def _get_sync():
+    """Lazily get the CloudSync singleton."""
+    global _sync
+    if _sync is None:
         try:
-            # main.py --index prints JSON with documents_indexed
-            data = json.loads(result.stdout.strip().splitlines()[-1])
-            indexed_count = data.get("documents_indexed", "?")
-        except Exception:
-            pass
+            from app.cloud_sync import CloudSync
+            _sync = CloudSync.instance()
+        except Exception as exc:
+            print(f"CloudSync not available (cloud features disabled): {exc}")
+            _sync = False  # Sentinel: tried and failed
+    return _sync if _sync is not False else None
 
-        msg = f"Indexing complete ({indexed_count} documents)" if indexed_count else "Indexing complete"
-        print(f"[INDEX] {msg}")
 
-        update_history_entry(hist_id, {
-            "finished_at": _now_iso(),
-            "status": "success",
-            "error_message": None,
-        })
+def _find_generated_html(run_id: str) -> Path | None:
+    """
+    Find generated HTML for a run_id.
 
-        return True
+    Tries local filesystem first (same container, fast), then falls
+    back to CloudSync which checks MongoDB metadata + Backblaze B2.
+    """
+    # ── Local filesystem check ───────────────────────────────────────
+    blogs_dir = PROJECT_ROOT / "storage" / "blogs"
+    if blogs_dir.exists():
+        candidates = sorted(
+            blogs_dir.glob(f"*-{run_id}.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
 
-    except Exception as exc:
-        print(f"[INDEX] execution error: {exc}")
-        update_history_entry(hist_id, {
-            "finished_at": _now_iso(),
-            "status": "failed",
-            "error_message": str(exc),
-        })
-        return False
+    # ── CloudSync fallback ───────────────────────────────────────────
+    sync = _get_sync()
+    if sync:
+        html_content = sync.get_html_content(run_id)
+        if html_content:
+            # Write to a temp file so publish_local_html.py can use it
+            temp_dir = PROJECT_ROOT / "storage" / "blogs"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = temp_dir / f"restored-{run_id}.html"
+            temp_path.write_text(html_content, encoding="utf-8")
+            return temp_path
+
+    return None
 
 
 # ── Publish ─────────────────────────────────────────────────────────────
@@ -262,7 +201,7 @@ def _run_single_category(
     trigger_type: str,
 ) -> bool:
     """
-    Run main.py for a single category and publish the result.
+    Run main.py for a single category, sync to cloud, and publish.
 
     Args:
         job:          The job row from the database.
@@ -336,11 +275,40 @@ def _run_single_category(
             "run_id": run_id,
         })
 
-        # Try to publish with this category's ID
+        # ── Sync artifacts to cloud (B2 + MongoDB) ─────────────────────
+        if run_id:
+            sync = _get_sync()
+            if sync:
+                try:
+                    sync_result = sync.sync_run(
+                        run_id=run_id,
+                        topic=None,  # Not easily available here; metadata handles it
+                        job_id=job_id,
+                        category=topic_cat,
+                    )
+                    print(f"[CloudSync] Run {run_id} synced: "
+                          f"html={bool(sync_result.get('html'))}, "
+                          f"md={bool(sync_result.get('md'))}, "
+                          f"images={len(sync_result.get('images', []))}, "
+                          f"cloud={sync_result.get('cloud_enabled')}")
+                except Exception as exc:
+                    print(f"[CloudSync] Sync failed for run {run_id}: {exc}")
+                    # Non-fatal — local files still work
+
+        # ── Try to publish ────────────────────────────────────────────
         if run_id:
             html_path = _find_generated_html(run_id)
             if html_path:
-                _publish_html(category_id, wp_status, html_path, hist_id)
+                publish_ok = _publish_html(category_id, wp_status, html_path, hist_id)
+
+                # Mark as published in blog_metadata
+                if publish_ok:
+                    sync = _get_sync()
+                    if sync:
+                        try:
+                            sync.mark_published(run_id, publish_status="success")
+                        except Exception:
+                            pass  # Non-fatal
             else:
                 update_history_entry(hist_id, {
                     "publish_status": "skipped",
@@ -368,13 +336,8 @@ def _run_single_category(
 
 def execute_job(job_id: int, trigger_type: str = "scheduler") -> None:
     """
-    Run a job based on its type:
-      - 'index':    Run sitemap indexing (crawl → embed → store)
-      - 'alarm':    Run once at a specific time
-      - 'interval': Run every N hours
-
-    For non-index jobs, if category is "All Categories", runs all 5
-    categories sequentially. Otherwise runs a single category.
+    Run a job. If category is "All Categories", runs all 5 categories
+    sequentially. Otherwise runs a single category.
 
     Args:
         job_id:       The database row ID.
@@ -405,58 +368,41 @@ def execute_job(job_id: int, trigger_type: str = "scheduler") -> None:
     })
 
     try:
-        job_type = job.get("job_type", JOB_TYPE_INTERVAL)
+        category_name = job.get("category_name", "Sports")
 
-        # ═══════════════════════════════════════════════════════════════
-        # INDEX JOB — crawl sitemap → embed → store
-        # ═══════════════════════════════════════════════════════════════
-        if job_type == JOB_TYPE_INDEX:
-            ok = _run_indexing(job, trigger_type)
+        # ── All Categories mode: run each category one by one ─────────
+        if category_name == ALL_CATEGORIES_LABEL:
+            results: dict[str, bool] = {}
+            for cat_name, cat_info in CATEGORY_MAP.items():
+                print(f"\n>>> [{cat_name}] starting…")
+                ok = _run_single_category(job, cat_name, cat_info, trigger_type)
+                results[cat_name] = ok
+                status_word = "OK" if ok else "FAILED"
+                print(f">>> [{cat_name}] {status_word}")
+
+            all_ok = all(results.values())
+            if all_ok:
+                _finish_job(job_id, job, trigger_type, original_status, failed=False)
+            else:
+                failed_cats = [k for k, v in results.items() if not v]
+                _finish_job(
+                    job_id, job, trigger_type, original_status,
+                    failed=True,
+                    error=f"Failed categories: {', '.join(failed_cats)}",
+                )
+
+        # ── Single category mode ──────────────────────────────────────
+        else:
+            cat_info = CATEGORY_MAP.get(category_name, {
+                "topic_category": job.get("topic_category", "business"),
+                "category_id": job.get("category_id", ""),
+            })
+            ok = _run_single_category(job, category_name, cat_info, trigger_type)
             _finish_job(
                 job_id, job, trigger_type, original_status,
                 failed=not ok,
-                error=None if ok else "Indexing failed",
+                error=None if ok else f"main.py failed for {category_name}",
             )
-
-        # ═══════════════════════════════════════════════════════════════
-        # ARTICLE GENERATION JOBS (alarm / interval)
-        # ═══════════════════════════════════════════════════════════════
-        else:
-            category_name = job.get("category_name", "Sports")
-
-            # ── All Categories mode: run each category one by one ─────
-            if category_name == ALL_CATEGORIES_LABEL:
-                results: dict[str, bool] = {}
-                for cat_name, cat_info in CATEGORY_MAP.items():
-                    print(f"\n>>> [{cat_name}] starting…")
-                    ok = _run_single_category(job, cat_name, cat_info, trigger_type)
-                    results[cat_name] = ok
-                    status_word = "OK" if ok else "FAILED"
-                    print(f">>> [{cat_name}] {status_word}")
-
-                all_ok = all(results.values())
-                if all_ok:
-                    _finish_job(job_id, job, trigger_type, original_status, failed=False)
-                else:
-                    failed_cats = [k for k, v in results.items() if not v]
-                    _finish_job(
-                        job_id, job, trigger_type, original_status,
-                        failed=True,
-                        error=f"Failed categories: {', '.join(failed_cats)}",
-                    )
-
-            # ── Single category mode ──────────────────────────────────
-            else:
-                cat_info = CATEGORY_MAP.get(category_name, {
-                    "topic_category": job.get("topic_category", "business"),
-                    "category_id": job.get("category_id", ""),
-                })
-                ok = _run_single_category(job, category_name, cat_info, trigger_type)
-                _finish_job(
-                    job_id, job, trigger_type, original_status,
-                    failed=not ok,
-                    error=None if ok else f"main.py failed for {category_name}",
-                )
 
     except Exception as exc:
         print(f"Job #{job_id} execution error: {exc}")
@@ -490,7 +436,6 @@ def _finish_job(
         recurring schedule never stops.
       - Scheduled alarm + failure: status → failed (one-time job, won't
         retry automatically).
-      - Index jobs: always interval-based, always reschedule.
     """
     # ── Manual run: keep the original schedule intact ─────────────────
     if trigger_type == "manual":
@@ -503,14 +448,9 @@ def _finish_job(
 
     jt = job.get("job_type", JOB_TYPE_INTERVAL)
 
-    # ── Recurring (interval + index) jobs: ALWAYS continue the schedule
-    # Failures are logged in execution_history and in error_message,
-    # but the recurring timer never stops.
-    if jt in (JOB_TYPE_INTERVAL, JOB_TYPE_INDEX):
+    # ── Recurring (interval) jobs: ALWAYS continue the schedule ───────
+    if jt == JOB_TYPE_INTERVAL:
         hrs = int(job.get("interval_hours", DEFAULT_INTERVAL_HOURS))
-        # Default index interval is 24h if not specified
-        if jt == JOB_TYPE_INDEX and hrs == DEFAULT_INTERVAL_HOURS:
-            hrs = 24
         next_run = (datetime.now() + timedelta(hours=hrs)).isoformat()
         update_job(job_id, {
             "status": JOB_STATUS_PENDING,
@@ -540,8 +480,7 @@ def _scheduler_loop() -> None:
         try:
             due = get_pending_due_jobs()
             for job in due:
-                job_type = job.get("job_type", "interval")
-                print(f"Scheduler: job #{job['id']} '{job['name']}' ({job_type}) is due — executing")
+                print(f"Scheduler: job #{job['id']} '{job['name']}' is due — executing")
                 execute_job(job["id"], trigger_type="scheduler")
         except Exception as exc:
             print(f"Scheduler loop error: {exc}")
@@ -549,8 +488,35 @@ def _scheduler_loop() -> None:
 
 
 def start_scheduler_service() -> None:
-    """Initialise the DB and start the background scheduler thread."""
+    """Initialise the DB, cloud sync, and start the background scheduler thread."""
     init_db()
+
+    # ── Initialize cloud sync (MongoDB collections + B2 buckets) ───────
+    try:
+        sync = _get_sync()
+        if sync:
+            # cloud_enabled check is lazy — this first access triggers
+            # the B2 connection test and prints diagnostic warnings
+            cloud_ok = sync.cloud_enabled
+            result = sync.initialize()
+            print(f"CloudSync initialized: {json.dumps(result, default=str)}")
+            if not cloud_ok:
+                print("=" * 60)
+                print("[CloudSync] B2 cloud storage is NOT active.")
+                print("  Files will be stored locally ONLY — lost on CI/CD redeploy.")
+                print("  To fix, set these in your .env:")
+                print("    B2_ENDPOINT_URL=https://s3.<region>.backblazeb2.com")
+                print("    B2_ACCESS_KEY_ID=<your-key-id>")
+                print("    B2_SECRET_ACCESS_KEY=<your-application-key>")
+                print("  Example:")
+                print("    B2_ENDPOINT_URL=https://s3.us-west-002.backblazeb2.com")
+                print("    B2_ACCESS_KEY_ID=0051...your-key-id...")
+                print("    B2_SECRET_ACCESS_KEY=K005...your-application-key...")
+                print("=" * 60)
+    except Exception as exc:
+        print(f"CloudSync initialization skipped: {exc}")
+
+    # ── Start scheduler thread ────────────────────────────────────────
     global _scheduler_thread
     if _scheduler_thread is None or not _scheduler_thread.is_alive():
         _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
