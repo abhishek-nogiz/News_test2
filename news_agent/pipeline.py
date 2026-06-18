@@ -47,6 +47,13 @@ from .services import (
     WritingAgent,
 )
 
+# ─────────────────────────────────────────────────────────────────────────
+# NEW: SerpAPI usage tracking
+# Import the contextvars bind/unbind helpers so we can attribute every
+# SerpAPI call to the agent stage that issued it.
+# ─────────────────────────────────────────────────────────────────────────
+from .services.serpapi_usage import bind as _bind_serpapi, unbind as _unbind_serpapi
+
 
 STAGE_SEQUENCE = [
     "trigger",
@@ -190,10 +197,13 @@ class ContentPipeline:
 
         while stage_queue:
             stage_event = stage_queue.dequeue()
-            self.agents[stage_event.name].execute(context)
+            # CHANGED: wrap execute() so SerpAPI calls get attributed to the stage
+            self._execute_with_serpapi_tracking(self.agents[stage_event.name], context)
 
         if context.run is None:
             raise RuntimeError("Pipeline finished without a run context")
+        # NEW: log per-stage SerpAPI breakdown at the end of the run
+        self._log_serpapi_summary(context.run)
         return context.run
 
     def _run_langgraph(self, context: AgentContext) -> PipelineRun:
@@ -213,6 +223,8 @@ class ContentPipeline:
 
         if context.run is None:
             raise RuntimeError("LangGraph pipeline finished without a run context")
+        # NEW: log per-stage SerpAPI breakdown at the end of the run
+        self._log_serpapi_summary(context.run)
         return context.run
 
     def _get_graph_app(self):
@@ -240,8 +252,59 @@ class ContentPipeline:
                 seed_topics=state.get("seed_topics"),
                 run=state.get("run"),
             )
-            agent.execute(context)
+            # CHANGED: wrap execute() so SerpAPI calls get attributed to the stage
+            self._execute_with_serpapi_tracking(agent, context)
             self._last_graph_run = context.run
             return {"run": context.run}
 
         return run_stage
+
+    # ═══════════════════════════════════════════════════════════════════
+    # NEW: SerpAPI usage tracking helpers
+    # ═══════════════════════════════════════════════════════════════════
+    def _execute_with_serpapi_tracking(self, agent, context: AgentContext) -> None:
+        """Run a single agent with the (run, stage) bound so that any
+        SerpAPI call made by the agent (or any of its helpers) is
+        attributed to `agent.stage_name` on `context.run.serpapi_by_stage`.
+
+        The `trigger` stage has no `PipelineRun` yet (it creates one), so
+        we skip the binding for it — it makes 0 SerpAPI calls anyway.
+        """
+        if context.run is None:
+            agent.execute(context)
+            return
+
+        token = _bind_serpapi(context.run, agent.stage_name)
+        try:
+            agent.execute(context)
+        finally:
+            _unbind_serpapi(token)
+
+        stats = context.run.serpapi_by_stage.get(agent.stage_name)
+        if stats is not None and (stats.calls or stats.errors):
+            self.logger.info(
+                context.run,
+                f"[{agent.stage_name}] SerpAPI: "
+                f"calls={stats.calls} errors={stats.errors} "
+                f"engines={dict(stats.by_engine)}",
+            )
+
+    def _log_serpapi_summary(self, run: PipelineRun) -> None:
+        """Print a per-stage SerpAPI usage breakdown at the end of the run."""
+        if not run.serpapi_by_stage:
+            return
+        total = sum(s.calls for s in run.serpapi_by_stage.values())
+        total_err = sum(s.errors for s in run.serpapi_by_stage.values())
+        self.logger.info(
+            run,
+            f"=== SerpAPI usage summary: {total} calls, {total_err} errors ===",
+        )
+        for stage in STAGE_SEQUENCE:
+            stats = run.serpapi_by_stage.get(stage)
+            if stats is None or not (stats.calls or stats.errors):
+                continue
+            self.logger.info(
+                run,
+                f"  {stage:15s}  calls={stats.calls:3d}  "
+                f"errors={stats.errors}  engines={dict(stats.by_engine)}",
+            )

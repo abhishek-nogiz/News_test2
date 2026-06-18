@@ -103,6 +103,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _serialize_serpapi_usage(run) -> dict:
+    """Convert run.serpapi_by_stage into a JSON-friendly dict.
+
+    Returns a structure like:
+        {
+          "total_calls": 5,
+          "total_errors": 0,
+          "by_stage": {
+            "trends":   {"calls": 1, "errors": 0, "engines": {"google_trends_trending_now": 1}},
+            "research": {"calls": 4, "errors": 0, "engines": {"google_news": 1, "google": 3}}
+          }
+        }
+
+    Returns total_calls=0 and by_stage={} when no SerpAPI calls were made
+    (e.g. mock mode, --index mode, or the run failed before any search stage ran).
+    """
+    by_stage = {
+        stage: {
+            "calls": stats.calls,
+            "errors": stats.errors,
+            "engines": dict(stats.by_engine),
+        }
+        for stage, stats in run.serpapi_by_stage.items()
+    }
+    return {
+        "total_calls": sum(s.calls for s in run.serpapi_by_stage.values()),
+        "total_errors": sum(s.errors for s in run.serpapi_by_stage.values()),
+        "by_stage": by_stage,
+    }
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -168,6 +199,12 @@ def main() -> int:
         "seo_score": run.validation.seo_score if run.validation else None,
         "grounding_score": run.validation.grounding_score if run.validation else None,
         "issues": run.validation.issues if run.validation else [],
+        # ─────────────────────────────────────────────────────────────
+        # NEW: per-stage SerpAPI usage breakdown for this run.
+        # Populated by InstrumentedGoogleSearch via the contextvars
+        # binding set up in news_agent/pipeline.py.
+        # ─────────────────────────────────────────────────────────────
+        "serpapi_usage": _serialize_serpapi_usage(run),
     }
     print(json.dumps(summary, indent=2))
     return 0

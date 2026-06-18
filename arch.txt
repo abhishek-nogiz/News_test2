@@ -1,0 +1,118 @@
+news_agent
+├── __init__.py
+├── __pycache__
+│   ├── __init__.cpython-310.pyc
+│   ├── __init__.cpython-311.pyc
+│   ├── models.cpython-310.pyc
+│   ├── models.cpython-311.pyc
+│   ├── pipeline.cpython-310.pyc
+│   ├── pipeline.cpython-311.pyc
+│   └── services.cpython-310.pyc
+├── backup
+│   └── pipeline.py
+├── core
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── __init__.cpython-310.pyc
+│   │   └── __init__.cpython-311.pyc
+│   ├── config
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-310.pyc
+│   │   │   └── __init__.cpython-311.pyc
+│   │   └── backup
+│   │       └── __init__.py
+│   ├── logger
+│   │   ├── __init__.py
+│   │   └── __pycache__
+│   │       ├── __init__.cpython-310.pyc
+│   │       └── __init__.cpython-311.pyc
+│   └── queue
+│       ├── __init__.py
+│       └── __pycache__
+│           ├── __init__.cpython-310.pyc
+│           └── __init__.cpython-311.pyc
+├── models.py
+├── pipeline.py
+└── services
+    ├── __init__.py
+    ├── __pycache__
+    │   ├── __init__.cpython-310.pyc
+    │   ├── __init__.cpython-311.pyc
+    │   ├── base.cpython-310.pyc
+    │   ├── base.cpython-311.pyc
+    │   ├── helpers.cpython-310.pyc
+    │   └── helpers.cpython-311.pyc
+    ├── backup
+    │   └── __init__.py
+    ├── base.py
+    ├── formatter
+    │   └── __pycache__
+    │       ├── __init__.cpython-310.pyc
+    │       ├── __init__.cpython-311.pyc
+    │       ├── service.cpython-310.pyc
+    │       └── service.cpython-311.pyc
+    ├── generator
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── helpers.py
+    ├── image
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── internalLink
+    │   ├── __init__.py
+    │   ├── __pycache__
+    │   │   ├── __init__.cpython-310.pyc
+    │   │   ├── __init__.cpython-311.pyc
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   ├── backup
+    │   │   ├── __ini.py
+    │   │   └── service.py
+    │   └── service.py
+    ├── memory
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── planner
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── publisher
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── research
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── selector
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── trends
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    ├── trigger
+    │   ├── __pycache__
+    │   │   ├── service.cpython-310.pyc
+    │   │   └── service.cpython-311.pyc
+    │   └── service.py
+    └── validator
+        ├── __pycache__
+        │   ├── service.cpython-310.pyc
+        │   └── service.cpython-311.pyc
+        └── service.py
+
+40 directories, 76 files
