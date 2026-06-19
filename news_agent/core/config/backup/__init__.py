@@ -78,12 +78,40 @@ def _normalize_wordpress_status(value: str | None, default: str = "draft") -> st
     return aliases.get(normalized, default)
 
 
+def _env_list(name: str, default: list[str] | None = None) -> list[str]:
+    """Parse a comma-separated env var into a list of strings."""
+    value = os.getenv(name)
+    if value is None:
+        return default if default is not None else []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _env_json(name: str, default: dict | None = None) -> dict:
+    """Parse a JSON env var into a dict."""
+    import json
+    value = os.getenv(name)
+    if value is None:
+        return default if default is not None else {}
+    try:
+        return json.loads(value)
+    except Exception:
+        return default if default is not None else {}
+
+
 @dataclass(slots=True)
 class AppConfig:
+    # ── Existing fields (unchanged) ──
     groq_api_key: str | None = None
     groq_fallback_api_key: str | None = None
     gemini_api_key: str | None = None
     serpapi_key: str | None = None
+    # ── NEW: multi-key SerpAPI rotation ──
+    # Comma-separated list via SERPAPI_KEYS env var. When set, the
+    # pipeline uses SerpApiKeyRotator to round-robin through them and
+    # auto-failover on 429/quota errors. Backward compatible: if only
+    # SERPAPI (single key) is set, serpapi_keys will contain that one
+    # key and rotation is a no-op.
+    serpapi_keys: list[str] = None  # type: ignore[assignment]
     firecrawl_api_key: str | None = None
     country: str = "IN"
     trend_window: str = "24h"
@@ -106,6 +134,61 @@ class AppConfig:
     wordpress_graphql_password: str | None = None
     internal_link_embeddings_enabled: bool = False
 
+    # ── NEW: Tenant isolation ──
+    tenant_id: str = ""
+
+    # ── NEW: Vector store configuration ──
+    vector_store_type: str = "json"
+    vector_store_database_url: str = ""
+
+    # ── NEW: Sitemap discovery settings ──
+    sitemap_url: str = ""
+    sitemap_crawl_delay: float = 0.5
+    sitemap_max_urls: int = 500
+    sitemap_crawl_timeout: int = 15
+    sitemap_user_agent: str = "InternalLinkBot/1.0"
+    sitemap_include_patterns: list[str] = None  # type: ignore[assignment]
+    sitemap_exclude_patterns: list[str] = None  # type: ignore[assignment]
+    sitemap_category_map: dict[str, str] = None  # type: ignore[assignment]
+
+    # ── NEW: Indexing schedule ──
+    sitemap_cron_enabled: bool = False
+    sitemap_cron_interval_hours: int = 24
+    indexing_webhook_enabled: bool = False
+
+    # ── NEW: SerpAPI key rotation ──
+    # Hours to exclude a key from rotation after it returns a 429/quota
+    # error. Default 24h matches SerpAPI's typical behavior closely
+    # enough — the key will be retried after this period.
+    serpapi_key_exhaustion_hours: float = 24.0
+
+    def __post_init__(self) -> None:
+        """Set mutable defaults after dataclass init (slots=True requires this)."""
+        if self.serpapi_keys is None:
+            self.serpapi_keys = []
+        if self.sitemap_include_patterns is None:
+            self.sitemap_include_patterns = []
+        if self.sitemap_exclude_patterns is None:
+            self.sitemap_exclude_patterns = [
+                r"/pages/",
+                r"/advertise",
+                r"/contact",
+                r"/cookies",
+                r"/help-faq",
+                r"/privacy-policy",
+                r"/subscription-terms",
+                r"/terms-of-use",
+            ]
+        if self.sitemap_category_map is None:
+            self.sitemap_category_map = {
+                "politics": "politics",
+                "business": "business",
+                "sports": "sports",
+                "tech": "technology",
+                "stock-market": "stock-market",
+                "travel": "travel",
+            }
+
     @property
     def trend_window_hours(self) -> int:
         return TREND_WINDOW_HOURS[self.trend_window]
@@ -124,11 +207,42 @@ class AppConfig:
             or "meta-llama/llama-4-scout-17b-16e-instruct"
         )
         fallback_groq_model = os.getenv("NEWS_AGENT_GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
+
+        # ───────────────────────────────────────────────────────────
+        # NEW: SerpAPI multi-key resolution
+        #
+        #   SERPAPI=primary_key         # legacy single-key (backward compat)
+        #   SERPAPI_KEYS=k1,k2,k3       # new multi-key (preferred)
+        #
+        # If only SERPAPI_KEYS is set, serpapi_key falls back to the first
+        # key in the list so the existing `not config.serpapi_key` mock-mode
+        # checks in trends/service.py and research/service.py still work.
+        #
+        # If both are set, both are merged (deduped) into serpapi_keys,
+        # and serpapi_key stays as the explicit primary.
+        # ───────────────────────────────────────────────────────────
+        primary_serpapi_key = os.getenv("SERPAPI")
+        serpapi_keys_list = _env_list("SERPAPI_KEYS")
+
+        if not primary_serpapi_key and serpapi_keys_list:
+            # Multi-key only — promote the first key to serpapi_key so
+            # legacy mock-mode checks (not config.serpapi_key) still pass
+            primary_serpapi_key = serpapi_keys_list[0]
+
+        if primary_serpapi_key and primary_serpapi_key not in serpapi_keys_list:
+            # Merge: legacy SERPAPI goes first, SERPAPI_KEYS after (deduped)
+            serpapi_keys_list = [primary_serpapi_key] + serpapi_keys_list
+
+        serpapi_exhaustion_hours = float(
+            os.getenv("NEWS_AGENT_SERPAPI_EXHAUSTION_HOURS", "24")
+        )
+
         return cls(
             groq_api_key=primary_groq_api_key,
             groq_fallback_api_key=fallback_groq_api_key,
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
-            serpapi_key=os.getenv("SERPAPI"),
+            serpapi_key=primary_serpapi_key,
+            serpapi_keys=serpapi_keys_list,
             firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY") or None,
             country=os.getenv("NEWS_AGENT_COUNTRY", "IN"),
             trend_window=_normalize_trend_window(os.getenv("NEWS_AGENT_TREND_WINDOW", "24h")),
@@ -153,4 +267,19 @@ class AppConfig:
             wordpress_graphql_user=os.getenv("WP_GRAPHQL_USER") or None,
             wordpress_graphql_password=os.getenv("WP_GRAPHQL_PASSWORD") or None,
             internal_link_embeddings_enabled=_env_flag("NEWS_AGENT_INTERNAL_LINK_EMBEDDINGS", default=False),
+            tenant_id=os.getenv("NEWS_AGENT_TENANT_ID", ""),
+            vector_store_type=os.getenv("NEWS_AGENT_VECTOR_STORE_TYPE", "json"),
+            vector_store_database_url=os.getenv("NEWS_AGENT_VECTOR_STORE_DATABASE_URL", ""),
+            sitemap_url=os.getenv("NEWS_AGENT_SITEMAP_URL", ""),
+            sitemap_crawl_delay=float(os.getenv("NEWS_AGENT_SITEMAP_CRAWL_DELAY", "0.5")),
+            sitemap_max_urls=int(os.getenv("NEWS_AGENT_SITEMAP_MAX_URLS", "500")),
+            sitemap_crawl_timeout=int(os.getenv("NEWS_AGENT_SITEMAP_CRAWL_TIMEOUT", "15")),
+            sitemap_user_agent=os.getenv("NEWS_AGENT_SITEMAP_USER_AGENT", "InternalLinkBot/1.0"),
+            sitemap_include_patterns=_env_list("NEWS_AGENT_SITEMAP_INCLUDE_PATTERNS"),
+            sitemap_exclude_patterns=None,
+            sitemap_category_map=None,
+            sitemap_cron_enabled=_env_flag("NEWS_AGENT_SITEMAP_CRON", default=False),
+            sitemap_cron_interval_hours=int(os.getenv("NEWS_AGENT_SITEMAP_CRON_INTERVAL", "24")),
+            indexing_webhook_enabled=_env_flag("NEWS_AGENT_INDEXING_WEBHOOK", default=False),
+            serpapi_key_exhaustion_hours=serpapi_exhaustion_hours,
         )

@@ -1654,24 +1654,16 @@ Hard requirements:
         return normalized.startswith(base_url.rstrip("/") + "/") or normalized == base_url.rstrip("/")
 
     def _ensure_also_read_block(self, article_html: str, topic: TrendTopic | None) -> str:
-        if topic is None:
-            return article_html
-
-        internal_article = self._select_internal_article(topic)
-        if internal_article is None:
-            return article_html
-        if internal_article["url"] in article_html or re.search(r">\s*Also Read\s*<", article_html, flags=re.IGNORECASE):
-            return article_html
-
-        paragraph_matches = list(
-            re.finditer(r"<!--\s*wp:paragraph\s*-->.*?<!--\s*/wp:paragraph\s*-->", article_html, flags=re.IGNORECASE | re.DOTALL)
-        )
-        if not paragraph_matches:
-            return article_html
-
-        insert_after = paragraph_matches[1].end() if len(paragraph_matches) >= 2 else paragraph_matches[0].end()
-        also_read_block = self._build_also_read_html(internal_article)
-        return article_html[:insert_after] + also_read_block + article_html[insert_after:]
+        # DISABLED — the AnchorInjectorService in
+        # news_agent/services/internalLink/service.py now handles ALL
+        # internal linking via the vector store + HF embeddings.
+        #
+        # The old code here built URLs from WP_GRAPHQL_URL which produced
+        # wrong "publisher.peoplenewstime.com" links and used keyword-only
+        # matching (no semantic similarity). Letting it run would insert
+        # a bad Also Read block that the injector then skips, leaving the
+        # article with only the wrong link.
+        return article_html
 
     def _build_also_read_markdown(self, internal_article: dict[str, str]) -> str:
         return (

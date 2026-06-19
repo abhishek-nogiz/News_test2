@@ -1,35 +1,14 @@
-"""Per-agent SerpAPI usage tracking via contextvars.
+"""Per-agent SerpAPI usage tracking + automatic key rotation on quota errors.
 
-How it works
-------------
-1. `pipeline.py` calls `bind(run, stage_name)` right before each agent's
-   `execute()` method runs, and `unbind(token)` right after (in a `finally`
-   block). This binds the current (run, stage) onto a ContextVar.
+Two concerns, one module:
 
-2. Any code that runs inside that `execute()` (including deep helper calls
-   like `ResearchService._search_context_reference`) can use
-   `InstrumentedGoogleSearch` as a drop-in replacement for
-   `serpapi.GoogleSearch`. The wrapper reads the bound (run, stage) and
-   increments the counters on `PipelineRun.serpapi_by_stage`.
+1. **Usage tracking** (per-stage counters on PipelineRun via contextvars)
+2. **Key rotation** (round-robin through multiple SerpAPI keys, with
+   automatic failover on 429/quota errors)
 
-3. If no (run, stage) is bound — e.g. someone constructs
-   `InstrumentedGoogleSearch` outside the pipeline — calls are silently
-   no-op for accounting. The actual SerpAPI request still happens.
-
-4. Errors are counted separately (`stats.errors += 1`) and the original
-   exception is re-raised so your existing error handling is unchanged.
-
-What gets counted
------------------
-* `stats.calls`         — total successful SerpAPI calls in this stage
-* `stats.errors`        — total SerpAPI calls that raised an exception
-* `stats.by_engine`     — per-engine breakdown, e.g.
-                          `{"google_trends_trending_now": 1, "google_news": 1, "google": 3}`
-
-Zero changes to existing agent code are required — both
-`trends/service.py` and `research/service.py` only need a one-line import
-swap from `from serpapi import GoogleSearch` to
-`from ..serpapi_usage import InstrumentedGoogleSearch as GoogleSearch`.
+Both are transparent to the calling code — `trends/service.py` and
+`research/service.py` still call `GoogleSearch(params).get_dict()` and
+don't know or care which key was used or which stage they're running in.
 """
 from __future__ import annotations
 
@@ -40,53 +19,42 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..models import PipelineRun
 
+from .serpapi_keys import get_rotator, is_quota_error
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# Per-stage usage tracking (unchanged from v1)
+# ─────────────────────────────────────────────────────────────────────────
 @dataclass(slots=True)
 class _CurrentCall:
     run: "PipelineRun"
     stage: str
 
 
-# ContextVar propagates through the entire synchronous call stack
-# (including into deeply-nested helper methods) automatically.
 _current: ContextVar[_CurrentCall | None] = ContextVar(
     "news_agent_serpapi_current", default=None
 )
 
 
 def bind(run: "PipelineRun", stage: str):
-    """Bind (run, stage) as the current attribution target.
-
-    Returns a token that must be passed to `unbind()` in a `finally` block.
-    """
+    """Bind (run, stage) as the current attribution target."""
     return _current.set(_CurrentCall(run=run, stage=stage))
 
 
 def unbind(token) -> None:
-    """Reset the ContextVar to its previous value."""
     _current.reset(token)
 
 
 def _record(engine: str, *, error: bool = False) -> None:
-    """Record one SerpAPI call against the currently-bound (run, stage).
-
-    Silently no-ops if nothing is bound (e.g. calls made outside the
-    pipeline) so utility scripts can still construct
-    `InstrumentedGoogleSearch` without breaking.
-    """
+    """Record one SerpAPI call against the currently-bound (run, stage)."""
     cur = _current.get()
     if cur is None:
         return
-
-    # Lazy import to avoid the circular import:
-    #   models.py -> (nothing) -> serpapi_usage.py -> models.py
     from ..models import SerpApiStats
-
     stats = cur.run.serpapi_by_stage.get(cur.stage)
     if stats is None:
         stats = SerpApiStats()
         cur.run.serpapi_by_stage[cur.stage] = stats
-
     if error:
         stats.errors += 1
     else:
@@ -94,69 +62,152 @@ def _record(engine: str, *, error: bool = False) -> None:
     stats.by_engine[engine] = stats.by_engine.get(engine, 0) + 1
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# InstrumentedGoogleSearch — drop-in replacement for serpapi.GoogleSearch
+# ─────────────────────────────────────────────────────────────────────────
 class InstrumentedGoogleSearch:
     """Drop-in replacement for `serpapi.GoogleSearch`.
 
     Same constructor signature, same `.get_dict()` / `.get_json()` /
-    `.get_response()` API — but every successful or failed call is
-    auto-attributed to the currently running agent stage via the
-    contextvars binding set up in `pipeline.py`.
+    `.get_response()` API.
 
-    Usage:
-        # Before (in trends/service.py and research/service.py):
-        from serpapi import GoogleSearch
-        response = GoogleSearch(params).get_dict()
+    Adds two things on top of the real client:
 
-        # After (one-line change):
-        from ..serpapi_usage import InstrumentedGoogleSearch as GoogleSearch
-        response = GoogleSearch(params).get_dict()
+    1. **Usage tracking** — every successful or failed call is
+       auto-attributed to the currently running agent stage via the
+       contextvars binding set up in `pipeline.py`.
+
+    2. **Key rotation** — if a `SerpApiKeyRotator` has been bound via
+       `serpapi_keys.set_rotator()`, the wrapper uses the rotator's
+       current key instead of whatever `api_key` is in `params`. On a
+       429/quota error, it marks that key exhausted and retries with
+       the next available key (up to N attempts = number of keys).
+       If all keys are exhausted, raises a clear `RuntimeError` with
+       the rotator state for debugging.
+
+    If no rotator is bound, falls back to legacy single-key behavior
+    (uses `params["api_key"]` as-is, no retry).
     """
 
     def __init__(self, params: dict | None = None, **kwargs: Any) -> None:
         from serpapi import GoogleSearch as _Real
 
-        # Construct the real client first. If the params are bad, we let
-        # the real exception propagate WITHOUT recording — nothing was
-        # actually sent to SerpAPI.
+        # Stash originals so we can rebuild the inner client with a
+        # different api_key on rotation
+        self._original_params = params
+        self._original_kwargs = kwargs
+        self._engine = (
+            (params or {}).get("engine", "unknown")
+            if isinstance(params, dict)
+            else kwargs.get("engine", "unknown")
+        )
+
+        rotator = get_rotator()
+
+        if rotator is not None and rotator.total_keys > 0:
+            # Rotation mode — pick a key from the rotator
+            key = rotator.next_key()
+            if key is None:
+                raise RuntimeError(
+                    "All SerpAPI keys are exhausted. "
+                    f"Rotator state: {rotator.stats()}"
+                )
+            self._key_used = key
+            # Override api_key in params (drop whatever the caller passed)
+            if isinstance(params, dict):
+                params = {**params, "api_key": key}
+            else:
+                kwargs = {**kwargs, "api_key": key}
+        else:
+            # Legacy single-key mode — use whatever api_key is in params
+            self._key_used = (
+                params.get("api_key") if isinstance(params, dict)
+                else kwargs.get("api_key")
+            )
+
         self._inner = _Real(params, **kwargs)
 
-        # Pull out the engine name for accounting. SerpAPI's params dict
-        # always carries an "engine" key (e.g. "google", "google_news",
-        # "google_trends_trending_now"). If it's missing for any reason
-        # we fall back to "unknown" so we never silently lose a count.
-        if isinstance(params, dict):
-            self._engine = params.get("engine", "unknown")
-        else:
-            self._engine = kwargs.get("engine", "unknown")
+    def _rebuild_with_new_key(self, new_key: str) -> None:
+        """Rebuild the inner serpapi client with a different api_key.
 
+        Called when we need to retry the same call with a different key
+        after a 429/quota error.
+        """
+        from serpapi import GoogleSearch as _Real
+        if isinstance(self._original_params, dict):
+            new_params = {**self._original_params, "api_key": new_key}
+            self._inner = _Real(new_params)
+        else:
+            new_kwargs = {**self._original_kwargs, "api_key": new_key}
+            self._inner = _Real(**new_kwargs)
+        self._key_used = new_key
+
+    def _call_with_rotation(self, method_name: str, *args: Any, **kwargs: Any):
+        """Call a method on the inner client, rotating keys on quota errors.
+
+        Tries up to N times (where N = number of keys in the rotator).
+        On a non-quota error, raises immediately without retrying.
+        """
+        rotator = get_rotator()
+        max_attempts = rotator.total_keys if rotator is not None else 1
+
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                method = getattr(self._inner, method_name)
+                result = method(*args, **kwargs)
+                # Success — record call on rotator + per-stage counter
+                if rotator is not None and self._key_used:
+                    rotator.record_call(self._key_used)
+                _record(self._engine)
+                return result
+
+            except Exception as exc:
+                last_exc = exc
+
+                # Non-quota error → record + re-raise immediately
+                if rotator is None or not is_quota_error(exc):
+                    if rotator is not None and self._key_used:
+                        rotator.record_error(self._key_used)
+                    _record(self._engine, error=True)
+                    raise
+
+                # Quota error → mark this key exhausted + try the next
+                if rotator is not None and self._key_used:
+                    rotator.record_error(self._key_used)
+                    rotator.mark_exhausted(self._key_used)
+
+                next_key = rotator.next_key() if rotator is not None else None
+                if next_key is None:
+                    # All keys exhausted — give up with a clear message
+                    _record(self._engine, error=True)
+                    raise RuntimeError(
+                        f"All SerpAPI keys exhausted after {attempt + 1} "
+                        f"attempt(s). Last error: {exc}. "
+                        f"Rotator state: {rotator.stats() if rotator else 'no rotator'}"
+                    ) from exc
+
+                # Rebuild the inner client with the new key and retry
+                self._rebuild_with_new_key(next_key)
+
+        # All attempts exhausted (shouldn't normally reach here)
+        _record(self._engine, error=True)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("SerpAPI call failed for unknown reasons")
+
+    # ───────────────────────────────────────────────────────────────
+    # Public API — same as serpapi.GoogleSearch
+    # ───────────────────────────────────────────────────────────────
     def get_dict(self) -> dict:
-        try:
-            result = self._inner.get_dict()
-        except Exception:
-            _record(self._engine, error=True)
-            raise
-        _record(self._engine)
-        return result
+        return self._call_with_rotation("get_dict")
 
     def get_json(self) -> str:
-        try:
-            result = self._inner.get_json()
-        except Exception:
-            _record(self._engine, error=True)
-            raise
-        _record(self._engine)
-        return result
+        return self._call_with_rotation("get_json")
 
     def get_response(self, *args: Any, **kwargs: Any):
-        try:
-            result = self._inner.get_response(*args, **kwargs)
-        except Exception:
-            _record(self._engine, error=True)
-            raise
-        _record(self._engine)
-        return result
+        return self._call_with_rotation("get_response", *args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
-        # Forward any attribute we didn't explicitly override
-        # (e.g. `.params`, `.backend`, `.serpapi_client`) to the real client.
+        # Forward anything we didn't explicitly override
         return getattr(self._inner, name)

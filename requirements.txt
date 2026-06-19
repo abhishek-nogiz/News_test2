@@ -11,3 +11,4 @@ flask
 apscheduler
 pymongo
 boto3
+huggingface_hub
