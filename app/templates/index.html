@@ -156,17 +156,75 @@
             margin-bottom: 0.75rem;
         }
 
+        /* ═══════════════════════════════════════════════════════════════
+           NEW: Scrollable list containers — Active Jobs + Past Jobs
+           Keeps section headers visible; only the job list scrolls.
+           ═══════════════════════════════════════════════════════════════ */
+        .jobs-scroll {
+            max-height: 480px;        /* Grows until 480px, then scrolls */
+            overflow-y: auto;         /* Vertical scrollbar when needed */
+            padding-right: 4px;       /* Prevents cards from touching scrollbar */
+            margin-bottom: 0.5rem;
+        }
+        /* Make the last job card not add bottom margin inside the scroller */
+        .jobs-scroll .job-card:last-child { margin-bottom: 0; }
+
         /* ── History table ── */
         .history-table { width: 100%; border-collapse: collapse; }
         .history-table th {
             text-align: left; font-size: 0.75rem; text-transform: uppercase;
             letter-spacing: 0.5px; color: var(--text-muted); padding: 0.5rem 0.5rem;
             border-bottom: 1px solid var(--card-border);
+            /* NEW: sticky header — stays visible while table body scrolls */
+            position: sticky;
+            top: 0;
+            background: var(--card);
+            z-index: 5;
         }
         .history-table td {
             padding: 0.5rem 0.5rem; font-size: 0.82rem; border-bottom: 1px solid var(--card-border);
         }
         .history-table tr:last-child td { border-bottom: none; }
+
+        /* NEW: scrollable history container — table body scrolls, header stays */
+        .history-scroll {
+            max-height: 400px;
+            overflow-y: auto;
+            overflow-x: auto;
+        }
+
+        /* ── Custom scrollbar styling (matches dark theme) ── */
+        .jobs-scroll::-webkit-scrollbar,
+        .history-scroll::-webkit-scrollbar,
+        .modal::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .jobs-scroll::-webkit-scrollbar-track,
+        .history-scroll::-webkit-scrollbar-track,
+        .modal::-webkit-scrollbar-track {
+            background: var(--input-bg);
+            border-radius: 4px;
+        }
+        .jobs-scroll::-webkit-scrollbar-thumb,
+        .history-scroll::-webkit-scrollbar-thumb,
+        .modal::-webkit-scrollbar-thumb {
+            background: var(--card-border);
+            border-radius: 4px;
+        }
+        .jobs-scroll::-webkit-scrollbar-thumb:hover,
+        .history-scroll::-webkit-scrollbar-thumb:hover,
+        .modal::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* Firefox scrollbar styling */
+        .jobs-scroll,
+        .history-scroll,
+        .modal {
+            scrollbar-width: thin;
+            scrollbar-color: var(--card-border) var(--input-bg);
+        }
 
         /* ── Modal ── */
         .modal-overlay {
@@ -247,6 +305,9 @@
             .form-row, .form-row-3 { grid-template-columns: 1fr; }
             body { padding: 1rem; }
             .job-actions { flex-wrap: wrap; }
+            /* On mobile, give the scrollable areas a bit more room */
+            .jobs-scroll { max-height: 380px; }
+            .history-scroll { max-height: 320px; }
         }
     </style>
 </head>
@@ -271,7 +332,8 @@
     <div class="section-head">
         <h3 style="margin:0">Active Jobs</h3>
     </div>
-    <div id="active-jobs">
+    <!-- NEW: wrapped in scrollable container -->
+    <div id="active-jobs" class="jobs-scroll">
         <div class="empty">No active jobs — click <strong>Create Job</strong> to get started.</div>
     </div>
 
@@ -279,28 +341,32 @@
     <div class="section-head" id="past-section" style="display:none;margin-top:1.25rem">
         <h3 style="margin:0">Past Jobs</h3>
     </div>
-    <div id="past-jobs"></div>
+    <!-- NEW: wrapped in scrollable container -->
+    <div id="past-jobs" class="jobs-scroll"></div>
 
     <!-- ── Execution History ── -->
     <div class="section-head" style="margin-top:1.75rem">
         <h3 style="margin:0">Execution History</h3>
     </div>
-    <div class="card" style="padding:0; overflow-x:auto">
-        <table class="history-table">
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Job</th>
-                    <th>Trigger</th>
-                    <th>Pipeline</th>
-                    <th>Publish</th>
-                    <th>Error</th>
-                </tr>
-            </thead>
-            <tbody id="history-body">
-                <tr><td colspan="6" class="empty">No executions yet.</td></tr>
-            </tbody>
-        </table>
+    <!-- NEW: history card with scrollable inner container -->
+    <div class="card" style="padding:0; overflow:hidden">
+        <div class="history-scroll">
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Job</th>
+                        <th>Trigger</th>
+                        <th>Pipeline</th>
+                        <th>Publish</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body">
+                    <tr><td colspan="6" class="empty">No executions yet.</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
