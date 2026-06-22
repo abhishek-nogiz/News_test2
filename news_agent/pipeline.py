@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TypedDict
 import uuid
 
@@ -157,6 +158,56 @@ class ContentPipeline:
 
         self.indexing_service = indexing_service or IndexingService(config, self.vector_store)
         self.retrieval_service = retrieval_service or RetrievalService(config, self.vector_store)
+
+        # ═══════════════════════════════════════════════════════════════
+        # NEW: SerpAPI key rotator initialization
+        # ═══════════════════════════════════════════════════════════════
+        # If SERPAPI_KEYS env var has multiple keys, set up the rotator
+        # so InstrumentedGoogleSearch (the drop-in wrapper in
+        # serpapi_usage.py) can failover on 429/quota errors.
+        #
+        # How it works:
+        #   1. trends/service.py + research/service.py call GoogleSearch(...).get_dict()
+        #   2. InstrumentedGoogleSearch picks the next available key (round-robin)
+        #   3. On HTTP 429 / "quota exceeded" / "rate limit":
+        #      - marks that key exhausted for 24h (configurable via
+        #        NEWS_AGENT_SERPAPI_EXHAUSTION_HOURS)
+        #      - retries with the next available key
+        #      - persists state to storage/serpapi_keys_state.json so
+        #        the next pipeline run knows which keys are dead
+        #   4. When ALL keys are exhausted, raises RuntimeError with
+        #      the full rotator state for debugging.
+        #
+        # Backward compat:
+        #   - If SERPAPI_KEYS has only 1 key (or only SERPAPI is set),
+        #     the rotator still initializes but never rotates — same
+        #     behavior as before.
+        #   - If neither is set, no rotator is initialized and
+        #     InstrumentedGoogleSearch falls back to whatever api_key
+        #     is in the params (legacy single-key mode).
+        # ═══════════════════════════════════════════════════════════════
+        if config.serpapi_keys and len(config.serpapi_keys) > 0:
+            try:
+                from .services.serpapi_keys import SerpApiKeyRotator, set_rotator
+                rotator = SerpApiKeyRotator(
+                    keys=config.serpapi_keys,
+                    state_path=Path("storage/serpapi_keys_state.json"),
+                    exhaustion_hours=config.serpapi_key_exhaustion_hours,
+                )
+                set_rotator(rotator)
+                if rotator.total_keys > 1:
+                    print(
+                        f"[Pipeline] SerpAPI key rotator initialized with "
+                        f"{rotator.total_keys} keys (failover ENABLED)"
+                    )
+                else:
+                    print(
+                        f"[Pipeline] SerpAPI single-key mode (no failover). "
+                        f"Set SERPAPI_KEYS=k1,k2,k3 to enable multi-key rotation."
+                    )
+            except Exception as exc:
+                print(f"[Pipeline] WARNING: Could not initialize SerpAPI rotator: {exc}")
+        # ═══════════════════════════════════════════════════════════════
 
         anchor_injector = anchor_injector_service or AnchorInjectorService(config)
         self.internal_link_agent = InternalLinkAgent(

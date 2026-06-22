@@ -19,8 +19,7 @@ FROM python:3.10-slim
 # git:        needed by some HF model fetches (rare, but safe to have)
 # curl:       for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates && \
-    update-ca-certificates \
+    ca-certificates \
     gcc \
     libxml2-dev \
     libxslt1-dev \
@@ -28,7 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxslt1.1 \
     git \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+ && update-ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 # ── Workdir ──
 WORKDIR /app
