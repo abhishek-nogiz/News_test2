@@ -26,7 +26,9 @@ from ..helpers import serialize, slugify, tokenize
 WORDPRESS_CATEGORY_IDS = {
         "US": 2,
         "Politics": 3,
+        "Business": 4,
         "Tech": 5,
+        "Stock Market": 6,
         "Sports": 9,
         "Travel": 10,
 }
@@ -35,8 +37,14 @@ WORDPRESS_CATEGORY_ALIASES = {
     "us": "US",
     "politics": "Politics",
     "political": "Politics",
+    "business": "Business",
+    "finance": "Business",
     "tech": "Tech",
     "technology": "Tech",
+    "stock-market": "Stock Market",
+    "stock market": "Stock Market",
+    "stockmarket": "Stock Market",
+    "stocks": "Stock Market",
     "sports": "Sports",
     "sport": "Sports",
     "travel": "Travel",
@@ -51,11 +59,19 @@ WORDPRESS_COUNTRY_CATEGORY_ALIASES = {
 }
 
 WORDPRESS_UNSUPPORTED_CATEGORIES = {
-        "business",
-        "business and finance",
-        "finance",
-        "stock market",
-        "stocks",
+        # All categories below are now SUPPORTED on WordPress:
+        #   - Business (id: 4)
+        #   - Stock Market (id: 6)
+        # Removed from this blocklist on 2026-06-22 because the
+        # publisher.peoplenewstime.com site now has these categories
+        # created in WordPress admin. Previously these were treated as
+        # "unsupported" and any article tagged with them fell back to
+        # WORDPRESS_DEFAULT_CATEGORIES = ["US", "Politics"], which is
+        # why all Business articles were landing in Politics.
+        #
+        # Leave this set empty (or add only genuinely unsupported
+        # categories) — Business/Finance/Stocks now resolve correctly
+        # via WORDPRESS_CATEGORY_ALIASES → WORDPRESS_CATEGORY_IDS.
 }
 
 WORDPRESS_DEFAULT_CATEGORIES = ["US", "Politics"]
