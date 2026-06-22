@@ -19,6 +19,8 @@ FROM python:3.10-slim
 # git:        needed by some HF model fetches (rare, but safe to have)
 # curl:       for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates && \
+    update-ca-certificates \
     gcc \
     libxml2-dev \
     libxslt1-dev \
