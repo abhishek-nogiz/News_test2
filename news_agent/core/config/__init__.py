@@ -105,6 +105,8 @@ class AppConfig:
     groq_fallback_api_key: str | None = None
     gemini_api_key: str | None = None
     serpapi_key: str | None = None
+    # ── NEW: multi-key SerpAPI rotation ──
+    serpapi_keys: list[str] = None  # type: ignore[assignment]
     firecrawl_api_key: str | None = None
     country: str = "IN"
     trend_window: str = "24h"
@@ -125,59 +127,45 @@ class AppConfig:
     wordpress_graphql_url: str | None = None
     wordpress_graphql_user: str | None = None
     wordpress_graphql_password: str | None = None
-    internal_link_embeddings_enabled: bool = False
+    # ── CHANGED: default True now that we use HuggingFace API (no PyTorch OOM) ──
+    internal_link_embeddings_enabled: bool = True
 
     # ── NEW: Tenant isolation ──
     tenant_id: str = ""
-    # Unique identifier for the current tenant/client.
-    # All vector store operations are scoped to this ID.
-    # Example: "peoplenewstime", "client-abc123"
 
     # ── NEW: Vector store configuration ──
     vector_store_type: str = "json"
-    # "json"     → JSONVectorStore (dev / single-tenant / < 10k articles)
-    # "pgvector" → PgvectorStore (production / multi-tenant / 10k+ articles)
-
     vector_store_database_url: str = ""
-    # PostgreSQL connection string for PgvectorStore.
-    # Only used when vector_store_type == "pgvector".
+
+    # ── NEW: HuggingFace embeddings API (replaces local SentenceTransformer) ──
+    hf_api_key: str = ""
+    hf_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+
+    # ── NEW: B2-backed vector store sync (survives Railway redeployments) ──
+    vector_store_b2_sync_enabled: bool = True
 
     # ── NEW: Sitemap discovery settings ──
     sitemap_url: str = ""
-    # URL to the client's sitemap.xml
-    # Can be a sitemap index — the provider handles recursion.
-
     sitemap_crawl_delay: float = 0.5
-    # Seconds to wait between HTTP requests when crawling.
-
     sitemap_max_urls: int = 500
-    # Maximum number of URLs to crawl per indexing run.
-
     sitemap_crawl_timeout: int = 15
-    # HTTP request timeout in seconds for each page fetch.
-
     sitemap_user_agent: str = "InternalLinkBot/1.0"
-    # User-Agent header sent during crawling.
-
     sitemap_include_patterns: list[str] = None  # type: ignore[assignment]
-    # Regex patterns — if specified, a URL must match at least one.
-    # Leave empty (None) to include everything after excludes.
-
     sitemap_exclude_patterns: list[str] = None  # type: ignore[assignment]
-    # Regex patterns — URLs matching any of these are skipped.
-
     sitemap_category_map: dict[str, str] = None  # type: ignore[assignment]
-    # Maps URL path segments to category names.
-    # Per-tenant configuration — NOT hardcoded inference.
-    # If None, categories come purely from HTML extraction.
 
     # ── NEW: Indexing schedule ──
     sitemap_cron_enabled: bool = False
     sitemap_cron_interval_hours: int = 24
     indexing_webhook_enabled: bool = False
 
+    # ── NEW: SerpAPI key rotation ──
+    serpapi_key_exhaustion_hours: float = 24.0
+
     def __post_init__(self) -> None:
         """Set mutable defaults after dataclass init (slots=True requires this)."""
+        if self.serpapi_keys is None:
+            self.serpapi_keys = []
         if self.sitemap_include_patterns is None:
             self.sitemap_include_patterns = []
         if self.sitemap_exclude_patterns is None:
@@ -219,11 +207,29 @@ class AppConfig:
             or "meta-llama/llama-4-scout-17b-16e-instruct"
         )
         fallback_groq_model = os.getenv("NEWS_AGENT_GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
+
+        # ───────────────────────────────────────────────────────────
+        # NEW: SerpAPI multi-key resolution
+        # ───────────────────────────────────────────────────────────
+        primary_serpapi_key = os.getenv("SERPAPI")
+        serpapi_keys_list = _env_list("SERPAPI_KEYS")
+
+        if not primary_serpapi_key and serpapi_keys_list:
+            primary_serpapi_key = serpapi_keys_list[0]
+
+        if primary_serpapi_key and primary_serpapi_key not in serpapi_keys_list:
+            serpapi_keys_list = [primary_serpapi_key] + serpapi_keys_list
+
+        serpapi_exhaustion_hours = float(
+            os.getenv("NEWS_AGENT_SERPAPI_EXHAUSTION_HOURS", "24")
+        )
+
         return cls(
             groq_api_key=primary_groq_api_key,
             groq_fallback_api_key=fallback_groq_api_key,
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
-            serpapi_key=os.getenv("SERPAPI"),
+            serpapi_key=primary_serpapi_key,
+            serpapi_keys=serpapi_keys_list,
             firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY") or None,
             country=os.getenv("NEWS_AGENT_COUNTRY", "IN"),
             trend_window=_normalize_trend_window(os.getenv("NEWS_AGENT_TREND_WINDOW", "24h")),
@@ -247,20 +253,37 @@ class AppConfig:
             wordpress_graphql_url=os.getenv("WP_GRAPHQL_URL") or None,
             wordpress_graphql_user=os.getenv("WP_GRAPHQL_USER") or None,
             wordpress_graphql_password=os.getenv("WP_GRAPHQL_PASSWORD") or None,
-            internal_link_embeddings_enabled=_env_flag("NEWS_AGENT_INTERNAL_LINK_EMBEDDINGS", default=False),
-            # ── NEW: internal linking env vars ──
+            # ── CHANGED: default True now that we use HuggingFace API ──
+            internal_link_embeddings_enabled=_env_flag(
+                "NEWS_AGENT_INTERNAL_LINK_EMBEDDINGS", default=True
+            ),
             tenant_id=os.getenv("NEWS_AGENT_TENANT_ID", ""),
             vector_store_type=os.getenv("NEWS_AGENT_VECTOR_STORE_TYPE", "json"),
             vector_store_database_url=os.getenv("NEWS_AGENT_VECTOR_STORE_DATABASE_URL", ""),
+            # ── NEW: HuggingFace embeddings API ──
+            hf_api_key=(
+                os.getenv("HUGGINGFACE_API_KEY")
+                or os.getenv("HF_API_KEY")
+                or ""
+            ),
+            hf_embedding_model=(
+                os.getenv("HUGGINGFACE_EMBEDDING_MODEL")
+                or "sentence-transformers/all-MiniLM-L6-v2"
+            ),
+            # ── NEW: B2-backed vector store sync ──
+            vector_store_b2_sync_enabled=_env_flag(
+                "NEWS_AGENT_VECTOR_STORE_B2_SYNC", default=True
+            ),
             sitemap_url=os.getenv("NEWS_AGENT_SITEMAP_URL", ""),
             sitemap_crawl_delay=float(os.getenv("NEWS_AGENT_SITEMAP_CRAWL_DELAY", "0.5")),
             sitemap_max_urls=int(os.getenv("NEWS_AGENT_SITEMAP_MAX_URLS", "500")),
             sitemap_crawl_timeout=int(os.getenv("NEWS_AGENT_SITEMAP_CRAWL_TIMEOUT", "15")),
             sitemap_user_agent=os.getenv("NEWS_AGENT_SITEMAP_USER_AGENT", "InternalLinkBot/1.0"),
             sitemap_include_patterns=_env_list("NEWS_AGENT_SITEMAP_INCLUDE_PATTERNS"),
-            sitemap_exclude_patterns=None,  # uses default from __post_init__
-            sitemap_category_map=None,  # uses default from __post_init__
+            sitemap_exclude_patterns=None,
+            sitemap_category_map=None,
             sitemap_cron_enabled=_env_flag("NEWS_AGENT_SITEMAP_CRON", default=False),
             sitemap_cron_interval_hours=int(os.getenv("NEWS_AGENT_SITEMAP_CRON_INTERVAL", "24")),
             indexing_webhook_enabled=_env_flag("NEWS_AGENT_INDEXING_WEBHOOK", default=False),
+            serpapi_key_exhaustion_hours=serpapi_exhaustion_hours,
         )

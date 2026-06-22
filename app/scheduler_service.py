@@ -5,6 +5,14 @@ Runs as a daemon thread, continuously polling the database for due jobs.
 Executes main.py and publish_local_html.py via subprocess — never imports
 from news_agent.
 
+CHANGES FROM ORIGINAL:
+  - After each pipeline run, calls CloudSync.sync_run() to upload
+    artifacts to Backblaze B2 and save metadata to MongoDB.
+  - Uses CloudSync.get_html_content() instead of _find_generated_html()
+    to locate HTML files (local-first, B2 fallback).
+  - Uses CloudSync for scheduler status instead of scheduler_status.json.
+  - Marks blog_metadata as published after successful publish.
+
 When a job's category is "All Categories", it runs all 5 categories
 sequentially (Politics, Sports, Technology, Business & Finance, Travel),
 each with its own main.py call and publish step with the correct category_id.
@@ -28,8 +36,8 @@ from app.scheduler_config import (
     CATEGORY_MAP,
     DEFAULT_INTERVAL_HOURS,
     ALL_CATEGORIES_LABEL,
-    JOB_TYPE_ALARM,
     JOB_TYPE_INTERVAL,
+    JOB_TYPE_ALARM,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JOB_STATUS_COMPLETED,
@@ -74,16 +82,58 @@ def _extract_run_id(stdout: str) -> str | None:
     return m.group(1) if m else None
 
 
+# ── CloudSync lazy loader ────────────────────────────────────────────────
+# We don't import CloudSync at module level because it depends on
+# B2/MongoDB engines which may not be configured yet.  Instead we
+# load it lazily and gracefully degrade if cloud is not available.
+
+_sync = None
+
+
+def _get_sync():
+    """Lazily get the CloudSync singleton."""
+    global _sync
+    if _sync is None:
+        try:
+            from app.cloud_sync import CloudSync
+            _sync = CloudSync.instance()
+        except Exception as exc:
+            print(f"CloudSync not available (cloud features disabled): {exc}")
+            _sync = False  # Sentinel: tried and failed
+    return _sync if _sync is not False else None
+
+
 def _find_generated_html(run_id: str) -> Path | None:
+    """
+    Find generated HTML for a run_id.
+
+    Tries local filesystem first (same container, fast), then falls
+    back to CloudSync which checks MongoDB metadata + Backblaze B2.
+    """
+    # ── Local filesystem check ───────────────────────────────────────
     blogs_dir = PROJECT_ROOT / "storage" / "blogs"
-    if not blogs_dir.exists():
-        return None
-    candidates = sorted(
-        blogs_dir.glob(f"*-{run_id}.html"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
+    if blogs_dir.exists():
+        candidates = sorted(
+            blogs_dir.glob(f"*-{run_id}.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+
+    # ── CloudSync fallback ───────────────────────────────────────────
+    sync = _get_sync()
+    if sync:
+        html_content = sync.get_html_content(run_id)
+        if html_content:
+            # Write to a temp file so publish_local_html.py can use it
+            temp_dir = PROJECT_ROOT / "storage" / "blogs"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = temp_dir / f"restored-{run_id}.html"
+            temp_path.write_text(html_content, encoding="utf-8")
+            return temp_path
+
+    return None
 
 
 # ── Publish ─────────────────────────────────────────────────────────────
@@ -151,7 +201,7 @@ def _run_single_category(
     trigger_type: str,
 ) -> bool:
     """
-    Run main.py for a single category and publish the result.
+    Run main.py for a single category, sync to cloud, and publish.
 
     Args:
         job:          The job row from the database.
@@ -225,11 +275,40 @@ def _run_single_category(
             "run_id": run_id,
         })
 
-        # Try to publish with this category's ID
+        # ── Sync artifacts to cloud (B2 + MongoDB) ─────────────────────
+        if run_id:
+            sync = _get_sync()
+            if sync:
+                try:
+                    sync_result = sync.sync_run(
+                        run_id=run_id,
+                        topic=None,  # Not easily available here; metadata handles it
+                        job_id=job_id,
+                        category=topic_cat,
+                    )
+                    print(f"[CloudSync] Run {run_id} synced: "
+                          f"html={bool(sync_result.get('html'))}, "
+                          f"md={bool(sync_result.get('md'))}, "
+                          f"images={len(sync_result.get('images', []))}, "
+                          f"cloud={sync_result.get('cloud_enabled')}")
+                except Exception as exc:
+                    print(f"[CloudSync] Sync failed for run {run_id}: {exc}")
+                    # Non-fatal — local files still work
+
+        # ── Try to publish ────────────────────────────────────────────
         if run_id:
             html_path = _find_generated_html(run_id)
             if html_path:
-                _publish_html(category_id, wp_status, html_path, hist_id)
+                publish_ok = _publish_html(category_id, wp_status, html_path, hist_id)
+
+                # Mark as published in blog_metadata
+                if publish_ok:
+                    sync = _get_sync()
+                    if sync:
+                        try:
+                            sync.mark_published(run_id, publish_status="success")
+                        except Exception:
+                            pass  # Non-fatal
             else:
                 update_history_entry(hist_id, {
                     "publish_status": "skipped",
@@ -370,15 +449,13 @@ def _finish_job(
     jt = job.get("job_type", JOB_TYPE_INTERVAL)
 
     # ── Recurring (interval) jobs: ALWAYS continue the schedule ───────
-    # Failures are logged in execution_history and in error_message,
-    # but the recurring timer never stops.
     if jt == JOB_TYPE_INTERVAL:
         hrs = int(job.get("interval_hours", DEFAULT_INTERVAL_HOURS))
         next_run = (datetime.now() + timedelta(hours=hrs)).isoformat()
         update_job(job_id, {
             "status": JOB_STATUS_PENDING,
             "next_run_at": next_run,
-            "error_message": error,  # logged but doesn't stop the schedule
+            "error_message": error,
         })
         return
 
@@ -411,8 +488,35 @@ def _scheduler_loop() -> None:
 
 
 def start_scheduler_service() -> None:
-    """Initialise the DB and start the background scheduler thread."""
+    """Initialise the DB, cloud sync, and start the background scheduler thread."""
     init_db()
+
+    # ── Initialize cloud sync (MongoDB collections + B2 buckets) ───────
+    try:
+        sync = _get_sync()
+        if sync:
+            # cloud_enabled check is lazy — this first access triggers
+            # the B2 connection test and prints diagnostic warnings
+            cloud_ok = sync.cloud_enabled
+            result = sync.initialize()
+            print(f"CloudSync initialized: {json.dumps(result, default=str)}")
+            if not cloud_ok:
+                print("=" * 60)
+                print("[CloudSync] B2 cloud storage is NOT active.")
+                print("  Files will be stored locally ONLY — lost on CI/CD redeploy.")
+                print("  To fix, set these in your .env:")
+                print("    B2_ENDPOINT_URL=https://s3.<region>.backblazeb2.com")
+                print("    B2_ACCESS_KEY_ID=<your-key-id>")
+                print("    B2_SECRET_ACCESS_KEY=<your-application-key>")
+                print("  Example:")
+                print("    B2_ENDPOINT_URL=https://s3.us-west-002.backblazeb2.com")
+                print("    B2_ACCESS_KEY_ID=0051...your-key-id...")
+                print("    B2_SECRET_ACCESS_KEY=K005...your-application-key...")
+                print("=" * 60)
+    except Exception as exc:
+        print(f"CloudSync initialization skipped: {exc}")
+
+    # ── Start scheduler thread ────────────────────────────────────────
     global _scheduler_thread
     if _scheduler_thread is None or not _scheduler_thread.is_alive():
         _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)

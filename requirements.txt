@@ -9,3 +9,5 @@ markdown
 google-genai
 flask
 apscheduler
+pymongo
+boto3>=1.26.0

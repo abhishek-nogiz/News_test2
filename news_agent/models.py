@@ -15,6 +15,16 @@ class RunLog:
     message: str
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# NEW: SerpAPI usage tracking (per-stage counters on each PipelineRun)
+# ─────────────────────────────────────────────────────────────────────────
+@dataclass(slots=True)
+class SerpApiStats:
+    calls: int = 0
+    errors: int = 0
+    by_engine: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class TrendTopic:
     keyword: str
@@ -210,6 +220,13 @@ class PipelineRun:
     images: list[ImageAsset] = field(default_factory=list)
     published: PublishArtifact | None = None
     logs: list[RunLog] = field(default_factory=list)
+
+    # ───────────────────────────────────────────────────────────────────
+    # NEW: per-stage SerpAPI usage for this run.
+    # Keyed by stage_name (e.g. "trends", "research"). Populated automatically
+    # by InstrumentedGoogleSearch via the contextvars binding in pipeline.py.
+    # ───────────────────────────────────────────────────────────────────
+    serpapi_by_stage: dict[str, SerpApiStats] = field(default_factory=dict)
 
     @classmethod
     def create(cls, trigger_source: str, country: str, max_topics: int) -> "PipelineRun":

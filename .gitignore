@@ -24,9 +24,10 @@ storage/
 tests/
 test.ipynb
 
-
-
-
+# SQLite
+*.db
+*.db-shm
+*.db-wal
 
 .env
 __pycache__/

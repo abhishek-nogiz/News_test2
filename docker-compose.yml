@@ -1,12 +1,26 @@
-# ─── docker-compose.yml for News Agent Pipeline ───
-# Start:        docker compose up -d
-# Logs:         docker compose logs -f news-agent
-# Stop:         docker compose down
-# Rebuild:      docker compose up -d --build
-# One-off run:  docker compose run --rm news-agent python main.py --trigger manual
-# Index only:   docker compose run --rm news-agent python main.py --index --sitemap-url https://example.com/sitemap.xml
+# ─── docker-compose.yml for News Agent Pipeline (with Vector Architecture) ───
+#
+# Start:            docker compose up -d
+# Logs:             docker compose logs -f news-agent
+# Stop:             docker compose down
+# Rebuild:          docker compose up -d --build
+# One-off run:      docker compose run --rm news-agent python main.py --trigger manual
+# Bootstrap index:  docker compose run --rm news-agent python scripts/bootstrap_vector_store.py --force
+# Refresh index:    docker compose run --rm news-agent python scripts/refresh_vector_store.py
+# Verify HF API:    docker compose run --rm news-agent python scripts/verify_embeddings.py
+# Test retrieval:   docker compose run --rm news-agent python scripts/test_internal_links.py --topic "Messi"
+#
+# CHANGES FROM ORIGINAL:
+#   - Added vector-refresh service (daily cron for index refresh)
+#   - Added explicit env var passthrough for new vector architecture
+#   - Added healthcheck via Docker itself
+#   - Added network alias for inter-container communication
+#   - Added logging driver config (10mb rotation, 3 files)
 
 services:
+  # ═══════════════════════════════════════════════════════════════════
+  # Main service: scheduler web UI + background job runner
+  # ═══════════════════════════════════════════════════════════════════
   news-agent:
     build: .
     container_name: news-agent
@@ -14,11 +28,84 @@ services:
       - .env
     environment:
       - TZ=Asia/Kolkata
+      # New vector architecture vars (also in .env, but listed for clarity)
+      # These override .env if set here.
+      # - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      # - NEWS_AGENT_SITEMAP_URL=${NEWS_AGENT_SITEMAP_URL}
+      # - NEWS_AGENT_TENANT_ID=${NEWS_AGENT_TENANT_ID}
+      # - NEWS_AGENT_INTERNAL_LINK_EMBEDDINGS=true
+      # - NEWS_AGENT_VECTOR_STORE_B2_SYNC=true
     volumes:
       # Persist storage (blogs, cache, vector-store, etc.) across restarts
       - ./storage:/app/storage
       # Persist SQLite scheduler DB
       - ./app/scheduler.db:/app/app/scheduler.db
+      # Persist .env (so changes don't require rebuild)
+      - ./.env:/app/.env:ro
     ports:
       - "8000:8000"
     restart: unless-stopped
+    networks:
+      - news-agent-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/jobs"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Daily vector store refresh (cron-style)
+  # Runs once at 03:00 UTC daily, then exits
+  # ═══════════════════════════════════════════════════════════════════
+  vector-refresh:
+    build: .
+    container_name: vector-refresh
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      # Same storage volume as main service (shared vector store)
+      - ./storage:/app/storage
+      - ./.env:/app/.env:ro
+    restart: "no"
+    entrypoint: ["python", "scripts/refresh_vector_store.py"]
+    # Override the command with a cron-like loop using sh + sleep
+    # This is simpler than installing cron in the container
+    command: >
+      sh -c "
+        echo 'Vector refresh service started. Will run daily at 03:00 UTC.';
+        while true; do
+          # Calculate seconds until next 03:00 UTC
+          NOW=$$(date +%s);
+          TARGET=$$(date -u -d 'tomorrow 03:00:00' +%s 2>/dev/null || date -u -d '+1 day 03:00:00' +%s);
+          SLEEP_SEC=$$((TARGET - NOW));
+          if [ $$SLEEP_SEC -le 0 ]; then SLEEP_SEC=86400; fi;
+          echo \"Next refresh in $$SLEEP_SEC seconds ($$((SLEEP_SEC/3600))h $$((SLEEP_SEC%3600/60))m)\";
+          sleep $$SLEEP_SEC;
+          echo \"[$$(date -u '+%Y-%m-%d %H:%M:%S UTC')] Starting daily vector refresh...\";
+          python scripts/refresh_vector_store.py;
+          echo \"[$$(date -u '+%Y-%m-%d %H:%M:%S UTC')] Refresh complete.\";
+        done
+      "
+    networks:
+      - news-agent-net
+    depends_on:
+      news-agent:
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  news-agent-net:
+    driver: bridge
+    name: news-agent-net

@@ -66,6 +66,19 @@ except ImportError:
 
 SentenceTransformer = None
 
+# ── NEW: HuggingFace API client (replaces local SentenceTransformer on Railway free tier) ──
+# Lazy import so the module still loads if requests isn't installed.
+# See embeddings.py for the full client. The IndexingService / RetrievalService
+# below now use HuggingFaceEmbeddings instead of a local model.
+try:
+    from .embeddings import HuggingFaceEmbeddings, create_embeddings_client
+except ImportError:
+    # Allow running this file standalone (e.g. quick smoke test) —
+    # in that case the embeddings client stays None and we fall back
+    # to keyword-only matching.
+    HuggingFaceEmbeddings = None  # type: ignore[assignment]
+    create_embeddings_client = None  # type: ignore[assignment]
+
 try:
     from groq import Groq
 except ImportError:
@@ -1106,9 +1119,26 @@ class IndexingService:
             self.providers.append(SitemapProvider(config))
 
         self._model: object | None = None
+        # ── CHANGED: prefer HuggingFace API client over local SentenceTransformer ──
+        # The local model path is kept as a fallback for local dev, but in
+        # production (Railway free tier) we use HF exclusively because:
+        #   1. PyTorch is ~700MB and OOMs the container on import.
+        #   2. The model cache is lost on every redeploy.
+        # See embeddings.py for the API client.
+        self._hf_client: Optional["HuggingFaceEmbeddings"] = None
+        self._hf_initialized: bool = False
 
     @property
     def model(self) -> object | None:
+        """
+        Legacy hook — returns the local SentenceTransformer if available.
+        Kept for backward compatibility with code that still calls
+        ``self.model.encode(...)``.
+
+        New code should use ``self.hf_client`` instead. The
+        ``index_tenant`` and ``index_single_document`` methods below
+        have been rewritten to use ``hf_client``.
+        """
         global SentenceTransformer
         if self._model is None:
             if SentenceTransformer is None:
@@ -1122,6 +1152,29 @@ class IndexingService:
             except Exception:
                 pass
         return self._model
+
+    @property
+    def hf_client(self) -> Optional["HuggingFaceEmbeddings"]:
+        """
+        Lazy-initialized HuggingFace embeddings client.
+
+        Returns None if:
+            - No API key is configured (caller falls back to keyword-only)
+            - The embeddings module failed to import
+
+        We cache the client (and a "we tried" flag) so we don't re-read
+        env vars on every call.
+        """
+        if self._hf_initialized:
+            return self._hf_client
+        self._hf_initialized = True
+        if create_embeddings_client is None:
+            return None
+        try:
+            self._hf_client = create_embeddings_client(self.config)
+        except Exception:
+            self._hf_client = None
+        return self._hf_client
 
     def add_provider(self, provider: DocumentProvider) -> None:
         self.providers.append(provider)
@@ -1180,13 +1233,17 @@ class IndexingService:
         # 2. Check which documents need (re-)indexing
         to_index: List[tuple[Document, List[float]]] = []
 
-        if self.model:
-            # Batch encode for efficiency
+        # ── CHANGED: prefer HF API client; fall back to local model only if HF not configured ──
+        hf = self.hf_client
+        use_local_model = (hf is None) and (self.model is not None)
+
+        if hf is not None:
+            # Batch encode via HuggingFace API (chunks of 32 internally).
+            # This is the production path on Railway free tier.
             texts_to_encode: List[str] = []
             docs_needing_embedding: List[Document] = []
 
             for doc in all_documents:
-                # Check if already indexed and unchanged
                 existing = self.vector_store.get_document(tenant_id, doc["slug"])
                 if existing and not force_refresh:
                     existing_lastmod = existing.get("last_modified", "")
@@ -1199,7 +1256,36 @@ class IndexingService:
                 texts_to_encode.append(text)
                 docs_needing_embedding.append(doc)
 
-            # Encode in batch (much faster than one-by-one)
+            if texts_to_encode:
+                try:
+                    embeddings_batch = hf.embed_batch(texts_to_encode)
+                    for doc, emb in zip(docs_needing_embedding, embeddings_batch):
+                        # embed_batch returns [] for any text that failed →
+                        # store the doc with an empty embedding so we still
+                        # benefit from keyword matching.
+                        to_index.append((doc, list(emb)))
+                except Exception:
+                    errors += len(docs_needing_embedding)
+
+        elif use_local_model:
+            # Legacy path: local SentenceTransformer (dev only).
+            # Kept so the diff stays minimal and local dev still works.
+            texts_to_encode = []
+            docs_needing_embedding = []
+
+            for doc in all_documents:
+                existing = self.vector_store.get_document(tenant_id, doc["slug"])
+                if existing and not force_refresh:
+                    existing_lastmod = existing.get("last_modified", "")
+                    doc_lastmod = doc.get("last_modified", "")
+                    if existing_lastmod and doc_lastmod and existing_lastmod >= doc_lastmod:
+                        skipped += 1
+                        continue
+
+                text = f"{doc['title']}. {doc['summary']}. {doc['content'][:500]}"
+                texts_to_encode.append(text)
+                docs_needing_embedding.append(doc)
+
             if texts_to_encode:
                 try:
                     embeddings = self.model.encode(texts_to_encode, convert_to_numpy=True)
@@ -1208,7 +1294,7 @@ class IndexingService:
                 except Exception:
                     errors += len(docs_needing_embedding)
         else:
-            # No embedding model — store without embeddings (keyword-only mode)
+            # No embedding source — store without embeddings (keyword-only mode)
             for doc in all_documents:
                 existing = self.vector_store.get_document(tenant_id, doc["slug"])
                 if existing and not force_refresh:
@@ -1243,7 +1329,15 @@ class IndexingService:
         """
         embedding: List[float] = []
 
-        if self.model:
+        # ── CHANGED: prefer HF API; fall back to local model only if HF not configured ──
+        hf = self.hf_client
+        if hf is not None:
+            text = f"{document['title']}. {document['summary']}. {document['content'][:500]}"
+            try:
+                embedding = hf.embed(text)
+            except Exception:
+                return False
+        elif self.model is not None:
             text = f"{document['title']}. {document['summary']}. {document['content'][:500]}"
             try:
                 embedding = self.model.encode(text).tolist()
@@ -1282,9 +1376,16 @@ class RetrievalService:
         self.config = config
         self.vector_store = vector_store
         self._model: object | None = None
+        # ── CHANGED: HF API client (preferred over local model on Railway) ──
+        self._hf_client: Optional["HuggingFaceEmbeddings"] = None
+        self._hf_initialized: bool = False
 
     @property
     def model(self) -> object | None:
+        """
+        Legacy hook — returns the local SentenceTransformer if available.
+        Kept for backward compat; new code should use ``hf_client``.
+        """
         if not getattr(self.config, "internal_link_embeddings_enabled", True):
             return None
 
@@ -1301,6 +1402,29 @@ class RetrievalService:
             except Exception:
                 pass
         return self._model
+
+    @property
+    def hf_client(self) -> Optional["HuggingFaceEmbeddings"]:
+        """
+        Lazy-initialized HuggingFace embeddings client.
+
+        Respects ``config.internal_link_embeddings_enabled`` — if the
+        operator explicitly disabled embeddings, we return None so the
+        retrieval falls back to keyword-only matching (same behavior
+        as the old code).
+        """
+        if not getattr(self.config, "internal_link_embeddings_enabled", True):
+            return None
+        if self._hf_initialized:
+            return self._hf_client
+        self._hf_initialized = True
+        if create_embeddings_client is None:
+            return None
+        try:
+            self._hf_client = create_embeddings_client(self.config)
+        except Exception:
+            self._hf_client = None
+        return self._hf_client
 
     def retrieve(
         self,
@@ -1320,7 +1444,14 @@ class RetrievalService:
         query_text = f"{topic.keyword}. {plan_summary or ''}"
         query_embedding: Optional[List[float]] = None
 
-        if self.model:
+        # ── CHANGED: prefer HF API; fall back to local model only if HF not configured ──
+        hf = self.hf_client
+        if hf is not None:
+            try:
+                query_embedding = hf.embed(query_text) or None
+            except Exception:
+                query_embedding = None
+        elif self.model is not None:
             query_embedding = self.model.encode(query_text).tolist()
 
         # 2. Vector search (with category filter from topic)
@@ -1623,15 +1754,198 @@ Return ONLY a valid JSON object with a "links" array of objects.
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# SYNCED JSON VECTOR STORE (B2-backed cache for Railway free tier)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SyncedJSONVectorStore(VectorStore):
+    """
+    JSONVectorStore + automatic B2 sync.
+
+    WHY THIS EXISTS
+    ===============
+    On Railway's free tier, the container's local filesystem is wiped
+    on every redeploy. That means the local ``documents.json`` /
+    ``embeddings.json`` files written by ``JSONVectorStore`` disappear,
+    and the next article-generation run finds an empty index.
+
+    This wrapper solves that by mirroring the local files to B2:
+
+        App startup        → download from B2 to local cache (one-time)
+        After bulk_upsert  → upload local cache back to B2
+        Search             → local only (no B2 traffic)
+
+    The on-disk format is identical to ``JSONVectorStore`` — this class
+    just adds B2 sync hooks around the write paths. If B2 is not
+    configured, it gracefully degrades to local-only behavior.
+
+    WHERE THINGS LIVE
+    =================
+    Local disk (fast, temporary):
+        storage/vector-store/tenants/{tenant_id}/
+            ├── documents.json
+            └── embeddings.json
+
+    B2 (slow, permanent):
+        bucket/vector-store/tenants/{tenant_id}/
+            ├── documents.json
+            └── embeddings.json
+
+    The B2 key prefix is ``vector-store/`` — added to CATEGORY_PREFIXES
+    in b2_engine.py via the default-when-unknown fallback
+    (``_resolve_category_prefix("vector-store") → "vector-store/"``).
+    """
+
+    B2_CATEGORY = "vector-store"
+
+    def __init__(
+        self,
+        storage_root: Path,
+        cloud_sync=None,
+        auto_download_on_init: bool = True,
+    ) -> None:
+        """
+        Args:
+            storage_root:    Local root (e.g. ``storage/vector-store``).
+            cloud_sync:      Optional ``CloudSync`` instance. If None or
+                             if cloud is disabled, the store operates
+                             in local-only mode (degraded).
+            auto_download_on_init:
+                             If True and cloud_sync is reachable, pull
+                             the latest ``documents.json`` and
+                             ``embeddings.json`` from B2 into the local
+                             cache on first use.
+        """
+        self._inner = JSONVectorStore(storage_root)
+        self._cloud_sync = cloud_sync
+        self._auto_download = auto_download_on_init
+        self._initialized_tenants: set[str] = set()
+
+    # ── B2 sync helpers ───────────────────────────────────────────────
+
+    def _cloud_enabled(self) -> bool:
+        if self._cloud_sync is None:
+            return False
+        try:
+            return bool(self._cloud_sync.cloud_enabled)
+        except Exception:
+            return False
+
+    def _download_from_b2(self, tenant_id: str) -> None:
+        """Pull documents.json + embeddings.json from B2 → local cache."""
+        if not self._cloud_enabled():
+            return
+        try:
+            sync = self._cloud_sync
+            b2 = sync._get_b2()  # type: ignore[attr-defined]
+            for filename in ("documents.json", "embeddings.json"):
+                key = f"tenants/{tenant_id}/{filename}"
+                if b2.object_exists(self.B2_CATEGORY, key):
+                    data = b2.download_bytes(self.B2_CATEGORY, key)
+                    local_path = self._inner._tenant_dir(tenant_id) / filename
+                    local_path.write_bytes(data)
+        except Exception as exc:
+            print(f"[SyncedJSONVectorStore] download failed: {exc}")
+
+    def _upload_to_b2(self, tenant_id: str) -> None:
+        """Push documents.json + embeddings.json from local cache → B2."""
+        if not self._cloud_enabled():
+            return
+        try:
+            sync = self._cloud_sync
+            b2 = sync._get_b2()  # type: ignore[attr-defined]
+            for filename in ("documents.json", "embeddings.json"):
+                local_path = self._inner._tenant_dir(tenant_id) / filename
+                if not local_path.exists():
+                    continue
+                key = f"tenants/{tenant_id}/{filename}"
+                b2.upload_file(self.B2_CATEGORY, str(local_path), key=key)
+        except Exception as exc:
+            print(f"[SyncedJSONVectorStore] upload failed: {exc}")
+
+    def _ensure_tenant_synced(self, tenant_id: str) -> None:
+        """Pull from B2 once per tenant per process lifetime."""
+        if tenant_id in self._initialized_tenants:
+            return
+        self._initialized_tenants.add(tenant_id)
+        if self._auto_download:
+            self._download_from_b2(tenant_id)
+
+    # ── VectorStore interface (delegates to inner JSONVectorStore) ───
+
+    def upsert(self, tenant_id: str, document: Document, embedding: List[float]) -> None:
+        self._ensure_tenant_synced(tenant_id)
+        self._inner.upsert(tenant_id, document, embedding)
+        self._upload_to_b2(tenant_id)
+
+    def bulk_upsert(self, tenant_id: str, items: List[tuple[Document, List[float]]]) -> int:
+        self._ensure_tenant_synced(tenant_id)
+        count = self._inner.bulk_upsert(tenant_id, items)
+        self._upload_to_b2(tenant_id)
+        return count
+
+    def search(
+        self,
+        tenant_id: str,
+        query_embedding: List[float],
+        limit: int = 20,
+        category_filter: Optional[List[str]] = None,
+    ) -> List[dict]:
+        # Search is read-only — no upload needed. But we still want
+        # the latest data on first access (in case this is a fresh
+        # container with an empty local cache).
+        self._ensure_tenant_synced(tenant_id)
+        return self._inner.search(
+            tenant_id=tenant_id,
+            query_embedding=query_embedding,
+            limit=limit,
+            category_filter=category_filter,
+        )
+
+    def delete(self, tenant_id: str, slug: str) -> bool:
+        self._ensure_tenant_synced(tenant_id)
+        found = self._inner.delete(tenant_id, slug)
+        if found:
+            self._upload_to_b2(tenant_id)
+        return found
+
+    def count(self, tenant_id: str) -> int:
+        self._ensure_tenant_synced(tenant_id)
+        return self._inner.count(tenant_id)
+
+    def get_document(self, tenant_id: str, slug: str) -> Optional[Document]:
+        self._ensure_tenant_synced(tenant_id)
+        return self._inner.get_document(tenant_id, slug)
+
+    # ── Public extras (used by maintenance scripts) ───────────────────
+
+    def force_upload(self, tenant_id: str) -> None:
+        """Force-push the local cache for a tenant to B2 (regardless of dirty state)."""
+        self._upload_to_b2(tenant_id)
+
+    def force_download(self, tenant_id: str) -> None:
+        """Force-pull the B2 copy for a tenant into the local cache (overwrites local)."""
+        self._download_from_b2(tenant_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # VECTOR STORE FACTORY
 # ═══════════════════════════════════════════════════════════════════════════
 
-def create_vector_store(config: AppConfig) -> VectorStore:
+def create_vector_store(config: AppConfig, cloud_sync=None) -> VectorStore:
     """
     Factory: create the right VectorStore based on config.
 
-    - If vector_store_type == "pgvector" and database_url is set → PgvectorStore
-    - Otherwise → JSONVectorStore (default, works everywhere)
+    Resolution order:
+        1. ``vector_store_type == "pgvector"`` + database_url set →
+           ``PgvectorStore`` (production / multi-tenant).
+        2. ``cloud_sync`` provided AND B2 reachable →
+           ``SyncedJSONVectorStore`` (Railway free tier — local cache
+           with B2 backup so it survives redeployments).
+        3. Otherwise → plain ``JSONVectorStore`` (local dev, no B2).
+
+    The ``cloud_sync`` parameter is optional — callers (pipeline.py)
+    can pass ``CloudSync.instance()`` after initialization. If not
+    passed, the factory falls back to plain JSONVectorStore.
     """
     store_type = getattr(config, "vector_store_type", "json")
     database_url = getattr(config, "vector_store_database_url", "")
@@ -1639,7 +1953,12 @@ def create_vector_store(config: AppConfig) -> VectorStore:
     if store_type == "pgvector" and database_url and psycopg2 is not None:
         return PgvectorStore(database_url)
 
-    return JSONVectorStore(Path(config.storage_root) / "vector-store")
+    storage_root = Path(config.storage_root) / "vector-store"
+
+    if cloud_sync is not None:
+        return SyncedJSONVectorStore(storage_root, cloud_sync=cloud_sync)
+
+    return JSONVectorStore(storage_root)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1767,7 +2086,51 @@ class AnchorInjectorService:
         else:
             output_parts.append(article_html[last_end:])
 
-        return "".join(output_parts)
+        result = "".join(output_parts)
+
+        # ── NEW: Related Articles fallback ───────────────────────────────
+        # If no anchors were inserted inline (which happens when the
+        # article body doesn't naturally contain the anchor phrases of
+        # the related articles — e.g., a "Mexico vs South Korea" article
+        # won't mention "Saudi Arabia" or "Belgium"), append a clean
+        # "Related Articles" section at the end with up to 4 links.
+        #
+        # These links:
+        #   - Use the correct URLs from the vector store (www.peoplenewstime.com/...)
+        #   - Have NO rel="nofollow" (good for SEO)
+        #   - Have NO target="_blank" (clean internal links)
+        #   - Are sorted by relevance score (best first)
+        if total_links_inserted == 0 and internal_links:
+            sorted_links = sorted(
+                internal_links,
+                key=lambda l: l.get("relevance_score", 0.0),
+                reverse=True,
+            )
+            related_links = sorted_links[:4]
+
+            list_items = []
+            for link in related_links:
+                url = escape(link["url"], quote=True)
+                title = escape(link["title"])
+                list_items.append(f'<li><a href="{url}">{title}</a></li>')
+
+            related_block = (
+                '\n<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n'
+                '<!-- wp:heading -->\n<h2>Related Articles</h2>\n<!-- /wp:heading -->\n'
+                '<!-- wp:list -->\n<ul>\n'
+                + "\n".join(list_items)
+                + '\n</ul>\n<!-- /wp:list -->\n'
+            )
+
+            close_match = re.search(r'</article>\s*$', result, flags=re.IGNORECASE)
+            if close_match:
+                result = result[:close_match.start()] + related_block + result[close_match.start():]
+            else:
+                result = result + related_block
+
+            total_links_inserted = len(related_links)
+
+        return result
 
     def _inject_into_paragraph(
         self,

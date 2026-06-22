@@ -4,6 +4,11 @@ Flask web UI for the Trend Agent Scheduler.
 Standalone layer — reads/writes the SQLite DB via scheduler_db and
 controls execution via scheduler_service.  Never imports from news_agent.
 
+Three job types:
+  - alarm:   Run once at a specific time
+  - interval: Run every N hours (article generation)
+  - index:    Crawl sitemap → embed → store (background indexing)
+
 API routes:
     GET  /                  Render dashboard
     GET  /api/jobs          List all jobs
@@ -30,8 +35,13 @@ from app.scheduler_config import (
     WORDPRESS_STATUSES,
     VALID_JOB_TYPES,
     JOB_TYPE_ALARM,
+    JOB_TYPE_INDEX,
     JOB_STATUS_PAUSED,
     JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_CANCELLED,
 )
 from app.scheduler_db import (
     create_job,
@@ -75,7 +85,30 @@ def api_create_job():
 
     job_type = data.get("job_type", "interval")
     if job_type not in VALID_JOB_TYPES:
-        return jsonify({"error": f"Invalid job type: {job_type}"}), 400
+        return jsonify({"error": f"Invalid job type: {job_type}. Must be one of: {', '.join(VALID_JOB_TYPES)}"}), 400
+
+    # ═══════════════════════════════════════════════════════════════════
+    # INDEX JOB — minimal validation (no category/country needed)
+    # ═══════════════════════════════════════════════════════════════════
+    if job_type == JOB_TYPE_INDEX:
+        interval_hours = data.get("interval_hours", 24)  # Default 24h for indexing
+
+        job = create_job({
+            "name": name,
+            "job_type": job_type,
+            "interval_hours": interval_hours,
+            # Index jobs don't need these, but DB requires them
+            "country": "US",
+            "category_name": "Indexing",
+            "topic_category": "",
+            "category_id": "",
+            "wordpress_status": "draft",
+        })
+        return jsonify(job), 201
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ALARM / INTERVAL JOBS — full validation
+    # ═══════════════════════════════════════════════════════════════════
 
     # Alarm must have a future datetime
     if job_type == JOB_TYPE_ALARM:
@@ -122,15 +155,16 @@ def api_update_job(job_id):
     if not existing:
         return jsonify({"error": "Job not found"}), 404
 
-    # Map category if changed
-    cat_name = data.get("category_name")
-    if cat_name == ALL_CATEGORIES_LABEL:
-        data["topic_category"] = "all"
-        data["category_id"] = ""
-    elif cat_name and cat_name in CATEGORY_MAP:
-        cat = CATEGORY_MAP[cat_name]
-        data["topic_category"] = cat["topic_category"]
-        data["category_id"] = cat["category_id"]
+    # Map category if changed (only for non-index jobs)
+    if existing.get("job_type") != JOB_TYPE_INDEX:
+        cat_name = data.get("category_name")
+        if cat_name == ALL_CATEGORIES_LABEL:
+            data["topic_category"] = "all"
+            data["category_id"] = ""
+        elif cat_name and cat_name in CATEGORY_MAP:
+            cat = CATEGORY_MAP[cat_name]
+            data["topic_category"] = cat["topic_category"]
+            data["category_id"] = cat["category_id"]
 
     job = update_job(job_id, data)
     return jsonify(job)
@@ -178,9 +212,9 @@ def api_run_job(job_id):
         return jsonify({"error": "Job not found"}), 404
     if existing["status"] == JOB_STATUS_RUNNING:
         return jsonify({"error": "Job is already running"}), 400
-    if existing["status"] in ("completed", "cancelled"):
-        return jsonify({"error": f"Cannot run a '{existing['status']}' job"}), 400
 
+    # Allow re-running completed, failed, cancelled, and pending jobs
+    # (previously blocked completed/cancelled, but that's annoying for testing)
     thread = threading.Thread(
         target=execute_job,
         args=(job_id,),

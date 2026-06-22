@@ -1,0 +1,55 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual envs
+venv/
+env/
+.venv/
+env311/
+Agents311/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Storage (will be mounted as volumes, don't bake into image)
+storage/blogs/*
+storage/cache/*
+storage/images/*
+storage/memory/*
+storage/trends/*
+storage/vector-store/*
+!storage/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Local SQLite DB (mount as volume instead)
+app/scheduler.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docs (don't need in image)
+*.md
+docs/
+vector_architecture_patch/

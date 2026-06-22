@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 try:
-    from serpapi import GoogleSearch
+    # CHANGED: was `from serpapi import GoogleSearch`
+    # Now uses the instrumented drop-in wrapper that auto-counts every
+    # SerpAPI call against the currently running pipeline stage.
+    from ..serpapi_usage import InstrumentedGoogleSearch as GoogleSearch
 except ImportError:
     GoogleSearch = None
 

@@ -11,7 +11,12 @@ except ImportError:
     Article = None
 
 try:
-    from serpapi import GoogleSearch
+    # CHANGED: was `from serpapi import GoogleSearch`
+    # Now uses the instrumented drop-in wrapper that auto-counts every
+    # SerpAPI call against the currently running pipeline stage.
+    # Both call sites in this file — research() (engine=google_news) and
+    # _search_context_reference() (engine=google) — are covered.
+    from ..serpapi_usage import InstrumentedGoogleSearch as GoogleSearch
 except ImportError:
     GoogleSearch = None
 
