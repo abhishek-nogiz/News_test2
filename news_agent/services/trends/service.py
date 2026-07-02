@@ -18,10 +18,20 @@ from ..helpers import safe_int, topic_category_trends_filter_id
 class TrendAcquisitionService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.last_fetch_debug: dict[str, object] = {}
 
     def fetch(self, country: str, limit: int) -> list[TrendTopic]:
         if self.config.mock_mode or GoogleSearch is None or not self.config.serpapi_key:
-            return self._mock_trends(limit)
+            trends = self._mock_trends(limit)
+            self.last_fetch_debug = {
+                "mode": "mock",
+                "geo": country,
+                "hours": self.config.trend_window_hours,
+                "topic_category": self.config.topic_category,
+                "category_id": topic_category_trends_filter_id(self.config.topic_category),
+                "trending_count": len(trends),
+            }
+            return trends
 
         params = {
             "engine": "google_trends_trending_now",
@@ -33,6 +43,16 @@ class TrendAcquisitionService:
         if category_id is not None:
             params["category_id"] = category_id
         response = GoogleSearch(params).get_dict()
+        raw_items = response.get("trending_searches", [])
+        self.last_fetch_debug = {
+            "mode": "serpapi",
+            "geo": country,
+            "hours": self.config.trend_window_hours,
+            "topic_category": self.config.topic_category,
+            "category_id": category_id,
+            "trending_count": len(raw_items),
+            "response_keys": sorted(response.keys()),
+        }
         return self.parse(response, limit)
 
     def parse(self, response: dict, limit: int) -> list[TrendTopic]:
@@ -86,5 +106,22 @@ class TrendAgent(BaseAgent):
 
         context.run.trends = trends
         self.logger.info(context.run, f"Collected {len(trends)} trend signals")
+        if not trends and not context.seed_topics:
+            debug = self.service.last_fetch_debug or {}
+            response_keys = debug.get("response_keys", [])
+            response_keys_text = ",".join(str(key) for key in response_keys) if response_keys else "none"
+            self.logger.info(
+                context.run,
+                (
+                    "Trend fetch debug: "
+                    f"mode={debug.get('mode', 'unknown')} "
+                    f"geo={debug.get('geo', context.run.country)} "
+                    f"hours={debug.get('hours', self.config.trend_window_hours)} "
+                    f"topic_category={debug.get('topic_category', self.config.topic_category)} "
+                    f"category_id={debug.get('category_id')} "
+                    f"raw_trending_count={debug.get('trending_count', 0)} "
+                    f"response_keys={response_keys_text}"
+                ),
+            )
         self.logger.transition(context.run, "trends_fetched")
         self.publisher.save_trends(context.run.run_id, trends)

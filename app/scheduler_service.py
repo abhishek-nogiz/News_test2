@@ -56,6 +56,7 @@ from app.scheduler_db import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAIN_PY = PROJECT_ROOT / "main.py"
 PUBLISH_SCRIPT = PROJECT_ROOT / "app" / "publish_local_html.py"
+SCHEDULER_LOG_DIR = PROJECT_ROOT / "storage" / "logs"
 
 # ── Concurrency guard ────────────────────────────────────────────────────
 _running_jobs: set[int] = set()
@@ -80,6 +81,123 @@ def _extract_run_id(stdout: str) -> str | None:
         pass
     m = re.search(r'"run_id"\s*:\s*"([^"]+)"', stdout)
     return m.group(1) if m else None
+
+
+def _summarize_main_failure(stdout: str, stderr: str, default: str) -> str:
+    """Return a compact, human-readable failure reason for scheduler history."""
+    for stream in (stderr, stdout):
+        if not stream:
+            continue
+        lines = [line.strip() for line in stream.splitlines() if line.strip()]
+        if not lines:
+            continue
+        # Keep the last meaningful line (usually the actual exception/error message).
+        detail = lines[-1]
+        if len(detail) > 180:
+            detail = detail[:177] + "..."
+        return f"{default} ({detail})"
+    return default
+
+
+def _tail_lines(text: str, max_lines: int = 12, max_chars: int = 300) -> list[str]:
+    if not text:
+        return []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    tail = lines[-max_lines:]
+    clipped: list[str] = []
+    for line in tail:
+        if len(line) > max_chars:
+            clipped.append(line[: max_chars - 3] + "...")
+        else:
+            clipped.append(line)
+    return clipped
+
+
+def _write_main_failure_log(
+    history_id: int,
+    cmd: list[str],
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> str:
+    """Persist full command/stdout/stderr for failed main.py runs."""
+    SCHEDULER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = SCHEDULER_LOG_DIR / f"main-failure-h{history_id}-{ts}.log"
+
+    payload = [
+        f"time: {_now_iso()}",
+        f"history_id: {history_id}",
+        f"return_code: {returncode}",
+        f"command: {' '.join(cmd)}",
+        "",
+        "===== STDOUT =====",
+        stdout or "",
+        "",
+        "===== STDERR =====",
+        stderr or "",
+        "",
+    ]
+    log_path.write_text("\n".join(payload), encoding="utf-8")
+    return str(log_path)
+
+
+def _stream_pipe_output(pipe, prefix: str, collector: list[str]) -> None:
+    """Read a subprocess pipe line-by-line, print it, and collect raw text."""
+    if pipe is None:
+        return
+    try:
+        for line in iter(pipe.readline, ""):
+            if line == "":
+                break
+            collector.append(line)
+            stripped = line.rstrip("\n")
+            if stripped:
+                print(f"{prefix}{stripped}")
+    finally:
+        pipe.close()
+
+
+def _run_streamed_process(cmd: list[str], cwd: str) -> tuple[int, str, str]:
+    """Run a command and stream stdout/stderr in real time."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    out_thread = threading.Thread(
+        target=_stream_pipe_output,
+        args=(proc.stdout, "MAIN STDOUT: ", stdout_lines),
+        daemon=True,
+    )
+    err_thread = threading.Thread(
+        target=_stream_pipe_output,
+        args=(proc.stderr, "MAIN STDERR: ", stderr_lines),
+        daemon=True,
+    )
+    out_thread.start()
+    err_thread.start()
+
+    started = time.time()
+    last_heartbeat = -1
+    while proc.poll() is None:
+        elapsed = int(time.time() - started)
+        if elapsed >= 20 and elapsed % 20 == 0 and elapsed != last_heartbeat:
+            print(f"[Scheduler] main.py still running... {elapsed}s")
+            last_heartbeat = elapsed
+        time.sleep(1)
+
+    out_thread.join(timeout=2)
+    err_thread.join(timeout=2)
+
+    return proc.returncode, "".join(stdout_lines), "".join(stderr_lines)
 
 
 # ── CloudSync lazy loader ────────────────────────────────────────────────
@@ -241,34 +359,50 @@ def _run_single_category(
             "--trigger", trigger_type,
         ]
 
+        print(
+            f"[Scheduler] starting job_id={job_id} cat={cat_name} "
+            f"topic_category={topic_cat} wp_status={wp_status} trigger={trigger_type}"
+        )
         print(f"\n{'='*60}")
         print(f"Job #{job_id} '{job['name']}' — category: {cat_name}")
         print(f"  {' '.join(cmd)}")
         print(f"  cwd={PROJECT_ROOT}")
         print(f"{'='*60}")
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        returncode, stdout_text, stderr_text = _run_streamed_process(
+            cmd,
+            cwd=str(PROJECT_ROOT),
         )
 
-        if result.stdout:
-            print("MAIN STDOUT:", result.stdout)
-        if result.stderr:
-            print("MAIN STDERR:", result.stderr)
-
         # ── main.py failed ────────────────────────────────────────────
-        if result.returncode != 0:
-            err = f"main.py exit code {result.returncode}"
-            print(f"[{cat_name}] {err}")
+        if returncode != 0:
+            failure_log = _write_main_failure_log(
+                hist_id,
+                cmd,
+                returncode,
+                stdout_text,
+                stderr_text,
+            )
+            err = _summarize_main_failure(
+                stdout_text,
+                stderr_text,
+                f"main.py exit code {returncode}",
+            )
+            tail = _tail_lines(stderr_text or stdout_text)
+            if tail:
+                print("[Scheduler] main.py failure tail:")
+                for line in tail:
+                    print(f"  {line}")
+            print(f"[{cat_name}] {err} | debug_log={failure_log}")
             update_history_entry(hist_id, {
                 "finished_at": _now_iso(),
                 "status": "failed",
-                "error_message": err,
+                "error_message": f"{err} | log: {failure_log}",
             })
             return False
 
         # ── main.py succeeded ─────────────────────────────────────────
-        run_id = _extract_run_id(result.stdout or "")
+        run_id = _extract_run_id(stdout_text or "")
         update_history_entry(hist_id, {
             "finished_at": _now_iso(),
             "status": "success",
@@ -479,6 +613,7 @@ def _scheduler_loop() -> None:
     while True:
         try:
             due = get_pending_due_jobs()
+            print(f"[Scheduler] poll at {_now_iso()} due_jobs={len(due)}")
             for job in due:
                 print(f"Scheduler: job #{job['id']} '{job['name']}' is due — executing")
                 execute_job(job["id"], trigger_type="scheduler")

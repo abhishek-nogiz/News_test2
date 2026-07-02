@@ -1379,6 +1379,9 @@ class RetrievalService:
         # ── CHANGED: HF API client (preferred over local model on Railway) ──
         self._hf_client: Optional["HuggingFaceEmbeddings"] = None
         self._hf_initialized: bool = False
+        # Diagnostics for pipeline logs.
+        self.last_resolved_tenant_id: str | None = None
+        self.last_tried_tenant_ids: List[str] = []
 
     @property
     def model(self) -> object | None:
@@ -1441,6 +1444,9 @@ class RetrievalService:
         which was populated by the IndexingService.
         """
         # 1. Prepare query
+        self.last_resolved_tenant_id = None
+        self.last_tried_tenant_ids = []
+
         query_text = f"{topic.keyword}. {plan_summary or ''}"
         query_embedding: Optional[List[float]] = None
 
@@ -1458,16 +1464,24 @@ class RetrievalService:
         category_filter = self._topic_categories(topic)
         search_limit = min(40, max(10, target_word_count // 50))
 
-        if query_embedding:
-            candidates = self.vector_store.search(
-                tenant_id=tenant_id,
-                query_embedding=query_embedding,
-                limit=search_limit,
-                category_filter=category_filter if category_filter else None,
-            )
-        else:
-            # No embedding model — fallback to keyword-only
-            candidates = self._keyword_fallback(tenant_id, topic, limit=search_limit)
+        candidates: List[dict] = []
+        for current_tenant_id in self._resolve_tenant_candidates(tenant_id):
+            self.last_tried_tenant_ids.append(current_tenant_id)
+            if query_embedding:
+                current_candidates = self.vector_store.search(
+                    tenant_id=current_tenant_id,
+                    query_embedding=query_embedding,
+                    limit=search_limit,
+                    category_filter=category_filter if category_filter else None,
+                )
+            else:
+                # No embedding model — fallback to keyword-only
+                current_candidates = self._keyword_fallback(current_tenant_id, topic, limit=search_limit)
+
+            if current_candidates:
+                self.last_resolved_tenant_id = current_tenant_id
+                candidates = current_candidates
+                break
 
         if not candidates:
             return []
@@ -1488,6 +1502,57 @@ class RetrievalService:
         final_links = self._llm_reasoning_filter(topic, top_candidates, limit=link_limit)
 
         return final_links
+
+    def _resolve_tenant_candidates(self, tenant_id: str) -> List[str]:
+        """
+        Build an ordered list of tenant IDs to try during retrieval.
+
+        This protects against common config drift where indexing and
+        retrieval use different tenant IDs (for example, empty string vs
+        hostname-derived tenant).
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str | None) -> None:
+            if value is None:
+                return
+            normalized = value.strip()
+            if normalized in seen:
+                return
+            seen.add(normalized)
+            ordered.append(normalized)
+
+        add(tenant_id)
+        add(getattr(self.config, "tenant_id", ""))
+        add("")
+        add("_default")
+
+        for url in (
+            getattr(self.config, "sitemap_url", ""),
+            getattr(self.config, "wordpress_graphql_url", ""),
+        ):
+            parsed = urlparse(url or "")
+            host = (parsed.hostname or "").lower().strip()
+            if not host:
+                continue
+            if host.startswith("www."):
+                host = host[4:]
+            add(host)
+            root_label = host.split(".")[0]
+            add(root_label)
+
+        # JSON stores place tenants under storage/vector-store/tenants/<tenant>
+        tenants_root = Path(self.config.storage_root) / "vector-store" / "tenants"
+        if tenants_root.exists():
+            try:
+                for child in tenants_root.iterdir():
+                    if child.is_dir():
+                        add(child.name)
+            except Exception:
+                pass
+
+        return ordered
 
     def _score_candidates(self, topic: TrendTopic, candidates: List[dict]) -> List[dict]:
         """
@@ -2004,6 +2069,53 @@ class InternalLinkAgent(BaseAgent):
             target_word_count=target_words,
             exclude_slug=slugify(current_slug_source)
         )
+
+        self.logger.info(
+            context.run,
+            (
+                "Internal-link retrieval tenant: "
+                f"requested='{self.tenant_id}', "
+                f"resolved='{self.retrieval_service.last_resolved_tenant_id or 'none'}', "
+                f"tried={self.retrieval_service.last_tried_tenant_ids}"
+            ),
+        )
+
+        # If retrieval returns nothing, attempt a one-time on-demand index build
+        # for the same tenant candidates. This avoids a common failure mode where
+        # the index was never bootstrapped before running the generation pipeline.
+        if not links and getattr(self.retrieval_service.config, "sitemap_url", ""):
+            try:
+                indexing_service = IndexingService(
+                    self.retrieval_service.config,
+                    self.retrieval_service.vector_store,
+                )
+                tenant_candidates = self.retrieval_service._resolve_tenant_candidates(self.tenant_id)
+                for candidate_tenant in tenant_candidates:
+                    result = indexing_service.index_tenant(candidate_tenant)
+                    if result.get("documents_indexed", 0) > 0:
+                        break
+
+                links = self.retrieval_service.retrieve(
+                    tenant_id=self.tenant_id,
+                    topic=context.run.selected_topic,
+                    plan_summary=plan_summary,
+                    target_word_count=target_words,
+                    exclude_slug=slugify(current_slug_source)
+                )
+
+                self.logger.info(
+                    context.run,
+                    (
+                        "Internal-link retrieval tenant after bootstrap: "
+                        f"requested='{self.tenant_id}', "
+                        f"resolved='{self.retrieval_service.last_resolved_tenant_id or 'none'}', "
+                        f"tried={self.retrieval_service.last_tried_tenant_ids}"
+                    ),
+                )
+            except Exception:
+                # Keep pipeline resilient: if bootstrapping fails, we continue
+                # without inline links and let publisher diagnostics surface state.
+                pass
 
         context.run.internal_links = links
 

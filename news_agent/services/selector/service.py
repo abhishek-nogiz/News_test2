@@ -100,6 +100,10 @@ class SelectorAgent(BaseAgent):
             raise RuntimeError("Run context is missing before topic selection")
 
         ranked = self.service.rank(context.run.trends)
+        self.logger.info(
+            context.run,
+            f"Selector input: raw_trends={len(context.run.trends)} ranked={len(ranked)}",
+        )
         topic_category = self.config.topic_category if self.config is not None else None
         uses_native_trends_filter = bool(
             topic_category
@@ -111,6 +115,14 @@ class SelectorAgent(BaseAgent):
             category_label = display_topic_category(self.config.topic_category) or self.config.topic_category
             self.logger.info(context.run, f"Requested topic filter: {category_label}")
             if not category_filtered:
+                self.logger.info(
+                    context.run,
+                    (
+                        f"Selector debug: category_filtered=0 "
+                        f"(uses_native_trends_filter={uses_native_trends_filter}, "
+                        f"topic_category={topic_category}, country={context.run.country})"
+                    ),
+                )
                 raise RuntimeError(
                     f"No {category_label} topics were found in the current {context.run.country} trend feed"
                 )

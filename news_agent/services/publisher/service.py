@@ -495,6 +495,11 @@ class PublisherService:
             resolved.append(configured_category)
             topical_found = True
 
+        # If a topic category is explicitly configured (e.g. scheduler selected Sports),
+        # treat it as authoritative and do not mix in heuristic/audience-derived categories.
+        if configured_category is not None:
+            return resolved
+
         for name in requested_names:
             canonical = self._canonical_wordpress_category(name)
             if canonical is not None and canonical not in resolved:
