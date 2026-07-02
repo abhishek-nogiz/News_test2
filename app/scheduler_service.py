@@ -38,6 +38,7 @@ from app.scheduler_config import (
     ALL_CATEGORIES_LABEL,
     JOB_TYPE_INTERVAL,
     JOB_TYPE_ALARM,
+    JOB_TYPE_INDEX,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JOB_STATUS_COMPLETED,
@@ -56,6 +57,7 @@ from app.scheduler_db import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAIN_PY = PROJECT_ROOT / "main.py"
 PUBLISH_SCRIPT = PROJECT_ROOT / "app" / "publish_local_html.py"
+REFRESH_VECTOR_STORE_SCRIPT = PROJECT_ROOT / "scripts" / "refresh_vector_store.py"
 SCHEDULER_LOG_DIR = PROJECT_ROOT / "storage" / "logs"
 
 # ── Concurrency guard ────────────────────────────────────────────────────
@@ -310,6 +312,72 @@ def _publish_html(
     return True
 
 
+def _run_index_job(job: dict, trigger_type: str) -> bool:
+    """Refresh the vector store through the existing maintenance script."""
+    job_id = job["id"]
+    now = _now_iso()
+
+    hist = create_history_entry({
+        "job_id": job_id,
+        "started_at": now,
+        "status": "running",
+        "trigger_type": trigger_type,
+    })
+    hist_id = hist.get("id")
+
+    cmd = [sys.executable, str(REFRESH_VECTOR_STORE_SCRIPT)]
+
+    tenant_id = str(job.get("tenant_id") or "").strip()
+    if tenant_id:
+        cmd.extend(["--tenant", tenant_id])
+
+    print(
+        f"[Scheduler] starting index job_id={job_id} "
+        f"tenant={tenant_id or 'env/default'} trigger={trigger_type}"
+    )
+    print(f"\n{'='*60}")
+    print(f"Job #{job_id} '{job['name']}' — index refresh")
+    print(f"  {' '.join(cmd)}")
+    print(f"  cwd={PROJECT_ROOT}")
+    print(f"{'='*60}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+
+    if result.stdout:
+        print("INDEX STDOUT:")
+        print(result.stdout)
+
+    if result.stderr:
+        print("INDEX STDERR:")
+        print(result.stderr)
+
+    if result.returncode not in (0, 2):
+        err = _summarize_main_failure(
+            result.stdout,
+            result.stderr,
+            f"refresh_vector_store.py exit code {result.returncode}",
+        )
+        update_history_entry(hist_id, {
+            "finished_at": _now_iso(),
+            "status": "failed",
+            "publish_status": "skipped",
+            "error_message": err,
+        })
+        return False
+
+    error_message = None
+    if result.returncode == 2:
+        error_message = "refresh_vector_store.py completed with partial indexing errors"
+
+    update_history_entry(hist_id, {
+        "finished_at": _now_iso(),
+        "status": "success",
+        "publish_status": "skipped",
+        "error_message": error_message,
+    })
+    return True
+
+
 # ── Run one category ────────────────────────────────────────────────────
 
 def _run_single_category(
@@ -502,6 +570,15 @@ def execute_job(job_id: int, trigger_type: str = "scheduler") -> None:
     })
 
     try:
+        if job.get("job_type") == JOB_TYPE_INDEX:
+            ok = _run_index_job(job, trigger_type)
+            _finish_job(
+                job_id, job, trigger_type, original_status,
+                failed=not ok,
+                error=None if ok else "vector-store refresh failed",
+            )
+            return
+
         category_name = job.get("category_name", "Sports")
 
         # ── All Categories mode: run each category one by one ─────────
@@ -583,7 +660,7 @@ def _finish_job(
     jt = job.get("job_type", JOB_TYPE_INTERVAL)
 
     # ── Recurring (interval) jobs: ALWAYS continue the schedule ───────
-    if jt == JOB_TYPE_INTERVAL:
+    if jt in {JOB_TYPE_INTERVAL, JOB_TYPE_INDEX}:
         hrs = int(job.get("interval_hours", DEFAULT_INTERVAL_HOURS))
         next_run = (datetime.now() + timedelta(hours=hrs)).isoformat()
         update_job(job_id, {

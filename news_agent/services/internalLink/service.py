@@ -1371,6 +1371,8 @@ class RetrievalService:
     WEIGHT_EMBEDDING = 0.5
     WEIGHT_CATEGORY = 0.3
     WEIGHT_KEYWORD = 0.2
+    TITLE_PHRASE_BOOST = 0.15
+    EXACT_TOPIC_BOOST = 0.2
 
     def __init__(self, config: AppConfig, vector_store: VectorStore) -> None:
         self.config = config
@@ -1495,6 +1497,7 @@ class RetrievalService:
 
         # 5. Sort and select top
         scored.sort(key=lambda x: x["_score"], reverse=True)
+        scored = self._dedupe_scored_candidates(scored)
         link_limit = min(8, max(2, int(target_word_count / 200)))
         top_candidates = scored[:link_limit * 2]
 
@@ -1568,6 +1571,8 @@ class RetrievalService:
         for cand in candidates:
             score = 0.0
             metadata = {}
+            clean_title = self._clean_candidate_title(cand.get("title", ""))
+            title_tokens = set(tokenize(clean_title))
 
             # A. Semantic score (from vector store)
             semantic_sim = cand.get("score", 0.0)
@@ -1584,12 +1589,49 @@ class RetrievalService:
             # C. Keyword/Tag overlap
             kw_score = self._keyword_score(topic_tokens, cand)
             score += kw_score * self.WEIGHT_KEYWORD
+            metadata["keyword_overlap"] = kw_score
+
+            # D. Prefer articles whose visible title directly overlaps the topic.
+            title_overlap = 0.0
+            if title_tokens and topic_tokens:
+                title_overlap = len(topic_tokens & title_tokens) / max(1, len(topic_tokens))
+                score += min(self.TITLE_PHRASE_BOOST, title_overlap * self.TITLE_PHRASE_BOOST)
+            metadata["title_overlap"] = title_overlap
+
+            topic_phrase = topic.keyword.strip().lower()
+            if topic_phrase and topic_phrase in clean_title.lower():
+                score += self.EXACT_TOPIC_BOOST
+                metadata["exact_topic_match"] = True
+            else:
+                metadata["exact_topic_match"] = False
 
             cand["_score"] = score
             cand["_metadata"] = metadata
             scored.append(cand)
 
         return scored
+
+    def _dedupe_scored_candidates(self, scored: List[dict]) -> List[dict]:
+        deduped: list[dict] = []
+        seen_titles: set[str] = set()
+        seen_urls: set[str] = set()
+
+        for candidate in scored:
+            normalized_title = self._clean_candidate_title(candidate.get("title", "")).lower()
+            normalized_url = str(candidate.get("url", "")).strip().lower()
+
+            if normalized_url and normalized_url in seen_urls:
+                continue
+            if normalized_title and normalized_title in seen_titles:
+                continue
+
+            if normalized_url:
+                seen_urls.add(normalized_url)
+            if normalized_title:
+                seen_titles.add(normalized_title)
+            deduped.append(candidate)
+
+        return deduped
 
     def _topic_categories(self, topic: TrendTopic) -> set[str]:
         """
@@ -1783,22 +1825,22 @@ Return ONLY a valid JSON object with a "links" array of objects.
         )
 
     def _derive_anchor_candidates(self, candidate: dict) -> List[AnchorCandidate]:
-        """Generates prioritized anchors from Tags and Title."""
+        """Generate anchors that are more likely to exist naturally in news prose."""
         raw_anchors: list[dict] = []
+        clean_title = self._clean_candidate_title(candidate.get("title", ""))
 
         # Priority 1: Tags
         tags = [str(tag).strip() for tag in candidate.get("tags", []) if str(tag).strip()]
         for tag in tags:
             raw_anchors.append({"text": tag, "priority": 1})
 
-        # Priority 2: Title
-        raw_anchors.append({"text": candidate["title"], "priority": 2})
+        # Priority 2: Entity-like title phrases such as person, place, race, or case names.
+        for phrase in self._candidate_title_phrases(clean_title):
+            raw_anchors.append({"text": phrase, "priority": 2})
 
-        # Priority 3: Shortened Title
-        title_words = candidate["title"].split()
-        if len(title_words) > 4:
-            short_title = " ".join(title_words[:3])
-            raw_anchors.append({"text": short_title, "priority": 3})
+        # Priority 3: Full cleaned title only when it is already compact.
+        if clean_title and len(clean_title.split()) <= 6:
+            raw_anchors.append({"text": clean_title, "priority": 3})
 
         seen: set[str] = set()
         final_anchors: List[AnchorCandidate] = []
@@ -1816,6 +1858,51 @@ Return ONLY a valid JSON object with a "links" array of objects.
             final_anchors.append(AnchorCandidate(text=text, priority=item["priority"]))
 
         return final_anchors
+
+    def _clean_candidate_title(self, title: str) -> str:
+        cleaned = re.sub(r"\s*\|\s*People News Time\s*$", "", title or "", flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _candidate_title_phrases(self, title: str) -> List[str]:
+        if not title:
+            return []
+
+        break_words = {
+            "after", "amid", "and", "as", "at", "before", "during", "faces",
+            "for", "from", "in", "latest", "on", "over", "predicting", "reveals",
+            "says", "shows", "to", "updates", "vs", "with"
+        }
+        generic_words = {
+            "breaking", "comments", "election", "final", "latest", "mixed", "outcome",
+            "predicting", "report", "results", "tough", "unexpected", "update", "updates"
+        }
+
+        phrases: list[str] = []
+        current: list[str] = []
+
+        def flush() -> None:
+            if 1 < len(current) <= 4:
+                lower_tokens = [token.lower() for token in current]
+                if not any(token in generic_words for token in lower_tokens):
+                    phrases.append(" ".join(current))
+            current.clear()
+
+        for token in re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*", title):
+            if token.lower() in break_words:
+                flush()
+                continue
+
+            if token[:1].isupper() or token.isupper() or token.isdigit():
+                current.append(token)
+                if len(current) == 4:
+                    flush()
+                continue
+
+            flush()
+
+        flush()
+        return phrases
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2212,7 +2299,10 @@ class AnchorInjectorService:
         #   - Have NO rel="nofollow" (good for SEO)
         #   - Have NO target="_blank" (clean internal links)
         #   - Are sorted by relevance score (best first)
-        if total_links_inserted == 0 and internal_links:
+        related_articles_enabled = bool(
+            getattr(self.config, "internal_link_related_articles_enabled", True)
+        )
+        if related_articles_enabled and total_links_inserted == 0 and internal_links:
             sorted_links = sorted(
                 internal_links,
                 key=lambda l: l.get("relevance_score", 0.0),

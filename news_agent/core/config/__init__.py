@@ -129,6 +129,7 @@ class AppConfig:
     wordpress_graphql_password: str | None = None
     # ── CHANGED: default True now that we use HuggingFace API (no PyTorch OOM) ──
     internal_link_embeddings_enabled: bool = True
+    internal_link_related_articles_enabled: bool = True
 
     # ── NEW: Tenant isolation ──
     tenant_id: str = ""
@@ -256,6 +257,9 @@ class AppConfig:
             # ── CHANGED: default True now that we use HuggingFace API ──
             internal_link_embeddings_enabled=_env_flag(
                 "NEWS_AGENT_INTERNAL_LINK_EMBEDDINGS", default=True
+            ),
+            internal_link_related_articles_enabled=_env_flag(
+                "NEWS_AGENT_INTERNAL_LINK_RELATED_ARTICLES", default=True
             ),
             tenant_id=os.getenv("NEWS_AGENT_TENANT_ID", ""),
             vector_store_type=os.getenv("NEWS_AGENT_VECTOR_STORE_TYPE", "json"),
