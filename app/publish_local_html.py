@@ -452,6 +452,9 @@ def main() -> int:
     args = parser.parse_args()
 
     token = os.getenv(args.token_env, "").strip()
+    print("TOKEN LENGTH:", len(token))
+    print("TOKEN PREFIX:", token[:25])
+    
     if not args.dry_run and not token:
         print(f"Missing bearer token. Set environment variable: {args.token_env}")
         return 1

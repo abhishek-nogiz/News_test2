@@ -127,8 +127,11 @@ class AppConfig:
     wordpress_graphql_url: str | None = None
     wordpress_graphql_user: str | None = None
     wordpress_graphql_password: str | None = None
+    internal_link_target: str = "people"
+    public_site_base_url: str = "https://www.peoplenewstime.com"
     # ── CHANGED: default True now that we use HuggingFace API (no PyTorch OOM) ──
     internal_link_embeddings_enabled: bool = True
+    internal_link_also_read_enabled: bool = True
     internal_link_related_articles_enabled: bool = True
 
     # ── NEW: Tenant isolation ──
@@ -254,9 +257,14 @@ class AppConfig:
             wordpress_graphql_url=os.getenv("WP_GRAPHQL_URL") or None,
             wordpress_graphql_user=os.getenv("WP_GRAPHQL_USER") or None,
             wordpress_graphql_password=os.getenv("WP_GRAPHQL_PASSWORD") or None,
+            internal_link_target=os.getenv("NEWS_AGENT_INTERNAL_LINK_TARGET", "people").strip().lower() or "people",
+            public_site_base_url=(os.getenv("NEWS_AGENT_PUBLIC_SITE_URL") or "https://www.peoplenewstime.com").strip(),
             # ── CHANGED: default True now that we use HuggingFace API ──
             internal_link_embeddings_enabled=_env_flag(
                 "NEWS_AGENT_INTERNAL_LINK_EMBEDDINGS", default=True
+            ),
+            internal_link_also_read_enabled=_env_flag(
+                "NEWS_AGENT_INTERNAL_LINK_ALSO_READ", default=True
             ),
             internal_link_related_articles_enabled=_env_flag(
                 "NEWS_AGENT_INTERNAL_LINK_RELATED_ARTICLES", default=True

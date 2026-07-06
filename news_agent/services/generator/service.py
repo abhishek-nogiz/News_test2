@@ -836,6 +836,9 @@ Hard requirements:
         if topic is None:
             return normalized
 
+        if not getattr(self.config, "internal_link_also_read_enabled", True):
+            return normalized
+
         internal_article = self._select_internal_article(topic)
         if internal_article is None or "Also Read" in normalized:
             return normalized
@@ -1741,6 +1744,9 @@ Hard requirements:
         current_slug = slugify(topic.keyword)
         candidates: list[tuple[int, float, str, str]] = []
         topic_tokens = set(tokenize(topic.keyword))
+        topic_category = str(
+            getattr(topic, "category", "") or getattr(self.config, "topic_category", "") or ""
+        ).strip().lower()
 
         for path in cache_dir.glob("publish-*.json"):
             try:
@@ -1755,6 +1761,15 @@ Hard requirements:
             remote_status = str(wordpress_sync.get("remote_status") or wordpress.get("post_status") or "").strip().lower()
             if not slug or not title or slug == current_slug or remote_status != "publish":
                 continue
+
+            if topic_category:
+                candidate_categories = [
+                    str(c).strip().lower()
+                    for c in (wordpress_sync.get("categories") or wordpress.get("categories") or [])
+                    if str(c).strip()
+                ]
+                if candidate_categories and topic_category not in candidate_categories:
+                    continue
 
             selected_topic = payload.get("run", {}).get("selected_topic", {})
             comparison_text = f"{title} {selected_topic.get('keyword', '')}"
@@ -1772,6 +1787,13 @@ Hard requirements:
         return {"title": title, "url": url}
 
     def _site_base_url(self) -> str | None:
+        target = str(getattr(self.config, "internal_link_target", "people") or "people").strip().lower()
+        if target == "people":
+            url = (getattr(self.config, "public_site_base_url", "") or "").strip()
+            if not url:
+                return None
+            return url.rstrip("/")
+
         url = (self.config.wordpress_graphql_url or "").strip()
         if not url:
             return None

@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import TypedDict, List, Optional, Dict, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 # Optional dependencies handled gracefully
 try:
@@ -1488,6 +1488,13 @@ class RetrievalService:
         if not candidates:
             return []
 
+        candidates = [
+            c for c in candidates
+            if self._is_allowed_internal_link_url(c.get("url", ""))
+        ]
+        if not candidates:
+            return []
+
         # 3. Exclude self-referencing slug
         if exclude_slug:
             candidates = [c for c in candidates if c.get("slug") != exclude_slug]
@@ -1814,14 +1821,73 @@ Return ONLY a valid JSON object with a "links" array of objects.
             return [self._map_to_link(c, reason="Related") for c in candidates[:limit]]
 
     def _map_to_link(self, candidate: dict, reason: str = "") -> InternalLink:
+        normalized_url = self._normalize_internal_link_url(candidate.get("url", ""))
         return InternalLink(
             title=candidate["title"],
-            url=candidate["url"],
+            url=normalized_url,
             slug=candidate["slug"],
             relevance_score=candidate.get("_score", candidate.get("score", 0.0)),
             category_match=candidate.get("_metadata", {}).get("category_match", False),
             reason=reason,
             anchor_candidates=self._derive_anchor_candidates(candidate)
+        )
+
+    def _is_allowed_internal_link_url(self, url: str) -> bool:
+        raw = str(url or "").strip()
+        if not raw:
+            return False
+
+        target = str(getattr(self.config, "internal_link_target", "people") or "people").strip().lower()
+        if target != "people":
+            return True
+
+        try:
+            parsed = urlparse(raw)
+        except Exception:
+            return False
+
+        host = (parsed.netloc or "").lower().strip()
+        if host.startswith("www."):
+            host = host[4:]
+        return host == "peoplenewstime.com"
+
+    def _normalize_internal_link_url(self, url: str) -> str:
+        raw = str(url or "").strip()
+        if not raw:
+            return raw
+
+        target = str(getattr(self.config, "internal_link_target", "people") or "people").strip().lower()
+        if target != "people":
+            return raw
+
+        base = str(getattr(self.config, "public_site_base_url", "") or "").strip()
+        if not base:
+            return raw
+
+        try:
+            parsed = urlparse(raw)
+            base_parsed = urlparse(base)
+        except Exception:
+            return raw
+
+        if not parsed.netloc:
+            return raw
+
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "peoplenewstime.com":
+            return raw
+
+        return urlunparse(
+            (
+                base_parsed.scheme or parsed.scheme or "https",
+                base_parsed.netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
         )
 
     def _derive_anchor_candidates(self, candidate: dict) -> List[AnchorCandidate]:
@@ -1982,6 +2048,11 @@ class SyncedJSONVectorStore(VectorStore):
         except Exception:
             return False
 
+    def _normalize_tenant_id(self, tenant_id: str) -> str:
+        """Use a stable tenant key for B2 object paths."""
+        normalized = (tenant_id or "").strip()
+        return normalized or "_default"
+
     def _download_from_b2(self, tenant_id: str) -> None:
         """Pull documents.json + embeddings.json from B2 → local cache."""
         if not self._cloud_enabled():
@@ -1989,11 +2060,12 @@ class SyncedJSONVectorStore(VectorStore):
         try:
             sync = self._cloud_sync
             b2 = sync._get_b2()  # type: ignore[attr-defined]
+            safe_tenant_id = self._normalize_tenant_id(tenant_id)
             for filename in ("documents.json", "embeddings.json"):
-                key = f"tenants/{tenant_id}/{filename}"
+                key = f"tenants/{safe_tenant_id}/{filename}"
                 if b2.object_exists(self.B2_CATEGORY, key):
                     data = b2.download_bytes(self.B2_CATEGORY, key)
-                    local_path = self._inner._tenant_dir(tenant_id) / filename
+                    local_path = self._inner._tenant_dir(safe_tenant_id) / filename
                     local_path.write_bytes(data)
         except Exception as exc:
             print(f"[SyncedJSONVectorStore] download failed: {exc}")
@@ -2005,34 +2077,38 @@ class SyncedJSONVectorStore(VectorStore):
         try:
             sync = self._cloud_sync
             b2 = sync._get_b2()  # type: ignore[attr-defined]
+            safe_tenant_id = self._normalize_tenant_id(tenant_id)
             for filename in ("documents.json", "embeddings.json"):
-                local_path = self._inner._tenant_dir(tenant_id) / filename
+                local_path = self._inner._tenant_dir(safe_tenant_id) / filename
                 if not local_path.exists():
                     continue
-                key = f"tenants/{tenant_id}/{filename}"
+                key = f"tenants/{safe_tenant_id}/{filename}"
                 b2.upload_file(self.B2_CATEGORY, str(local_path), key=key)
         except Exception as exc:
             print(f"[SyncedJSONVectorStore] upload failed: {exc}")
 
     def _ensure_tenant_synced(self, tenant_id: str) -> None:
         """Pull from B2 once per tenant per process lifetime."""
-        if tenant_id in self._initialized_tenants:
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        if safe_tenant_id in self._initialized_tenants:
             return
-        self._initialized_tenants.add(tenant_id)
+        self._initialized_tenants.add(safe_tenant_id)
         if self._auto_download:
-            self._download_from_b2(tenant_id)
+            self._download_from_b2(safe_tenant_id)
 
     # ── VectorStore interface (delegates to inner JSONVectorStore) ───
 
     def upsert(self, tenant_id: str, document: Document, embedding: List[float]) -> None:
-        self._ensure_tenant_synced(tenant_id)
-        self._inner.upsert(tenant_id, document, embedding)
-        self._upload_to_b2(tenant_id)
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        self._ensure_tenant_synced(safe_tenant_id)
+        self._inner.upsert(safe_tenant_id, document, embedding)
+        self._upload_to_b2(safe_tenant_id)
 
     def bulk_upsert(self, tenant_id: str, items: List[tuple[Document, List[float]]]) -> int:
-        self._ensure_tenant_synced(tenant_id)
-        count = self._inner.bulk_upsert(tenant_id, items)
-        self._upload_to_b2(tenant_id)
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        self._ensure_tenant_synced(safe_tenant_id)
+        count = self._inner.bulk_upsert(safe_tenant_id, items)
+        self._upload_to_b2(safe_tenant_id)
         return count
 
     def search(
@@ -2045,38 +2121,42 @@ class SyncedJSONVectorStore(VectorStore):
         # Search is read-only — no upload needed. But we still want
         # the latest data on first access (in case this is a fresh
         # container with an empty local cache).
-        self._ensure_tenant_synced(tenant_id)
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        self._ensure_tenant_synced(safe_tenant_id)
         return self._inner.search(
-            tenant_id=tenant_id,
+            tenant_id=safe_tenant_id,
             query_embedding=query_embedding,
             limit=limit,
             category_filter=category_filter,
         )
 
     def delete(self, tenant_id: str, slug: str) -> bool:
-        self._ensure_tenant_synced(tenant_id)
-        found = self._inner.delete(tenant_id, slug)
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        self._ensure_tenant_synced(safe_tenant_id)
+        found = self._inner.delete(safe_tenant_id, slug)
         if found:
-            self._upload_to_b2(tenant_id)
+            self._upload_to_b2(safe_tenant_id)
         return found
 
     def count(self, tenant_id: str) -> int:
-        self._ensure_tenant_synced(tenant_id)
-        return self._inner.count(tenant_id)
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        self._ensure_tenant_synced(safe_tenant_id)
+        return self._inner.count(safe_tenant_id)
 
     def get_document(self, tenant_id: str, slug: str) -> Optional[Document]:
-        self._ensure_tenant_synced(tenant_id)
-        return self._inner.get_document(tenant_id, slug)
+        safe_tenant_id = self._normalize_tenant_id(tenant_id)
+        self._ensure_tenant_synced(safe_tenant_id)
+        return self._inner.get_document(safe_tenant_id, slug)
 
     # ── Public extras (used by maintenance scripts) ───────────────────
 
     def force_upload(self, tenant_id: str) -> None:
         """Force-push the local cache for a tenant to B2 (regardless of dirty state)."""
-        self._upload_to_b2(tenant_id)
+        self._upload_to_b2(self._normalize_tenant_id(tenant_id))
 
     def force_download(self, tenant_id: str) -> None:
         """Force-pull the B2 copy for a tenant into the local cache (overwrites local)."""
-        self._download_from_b2(tenant_id)
+        self._download_from_b2(self._normalize_tenant_id(tenant_id))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2107,7 +2187,8 @@ def create_vector_store(config: AppConfig, cloud_sync=None) -> VectorStore:
 
     storage_root = Path(config.storage_root) / "vector-store"
 
-    if cloud_sync is not None:
+    b2_sync_enabled = bool(getattr(config, "vector_store_b2_sync_enabled", True))
+    if cloud_sync is not None and b2_sync_enabled:
         return SyncedJSONVectorStore(storage_root, cloud_sync=cloud_sync)
 
     return JSONVectorStore(storage_root)
@@ -2287,12 +2368,33 @@ class AnchorInjectorService:
 
         result = "".join(output_parts)
 
+        # ── NEW: Also Read fallback ─────────────────────────────────────
+        # If no anchors were inserted inline, optionally append a single
+        # "Also Read" callout using the top relevance link.
+        also_read_enabled = bool(
+            getattr(self.config, "internal_link_also_read_enabled", True)
+        )
+        if also_read_enabled and total_links_inserted == 0 and internal_links:
+            top_link = max(internal_links, key=lambda l: l.get("relevance_score", 0.0))
+            also_read_block = (
+                "\n<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n"
+                "<!-- wp:paragraph -->\n"
+                f"<p><strong>Also Read:</strong> <a href=\"{escape(top_link['url'], quote=True)}\">{escape(top_link['title'])}</a></p>\n"
+                "<!-- /wp:paragraph -->\n"
+                "<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n"
+            )
+
+            close_match = re.search(r'</article>\s*$', result, flags=re.IGNORECASE)
+            if close_match:
+                result = result[:close_match.start()] + also_read_block + result[close_match.start():]
+            else:
+                result = result + also_read_block
+
+            total_links_inserted = 1
+
         # ── NEW: Related Articles fallback ───────────────────────────────
-        # If no anchors were inserted inline (which happens when the
-        # article body doesn't naturally contain the anchor phrases of
-        # the related articles — e.g., a "Mexico vs South Korea" article
-        # won't mention "Saudi Arabia" or "Belgium"), append a clean
-        # "Related Articles" section at the end with up to 4 links.
+        # If no anchors were inserted inline and Also Read did not run,
+        # optionally append a "Related Articles" section with up to 4 links.
         #
         # These links:
         #   - Use the correct URLs from the vector store (www.peoplenewstime.com/...)

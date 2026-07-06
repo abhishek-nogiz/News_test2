@@ -115,17 +115,29 @@ class SelectorAgent(BaseAgent):
             category_label = display_topic_category(self.config.topic_category) or self.config.topic_category
             self.logger.info(context.run, f"Requested topic filter: {category_label}")
             if not category_filtered:
+                sample_keywords = ", ".join(item.keyword for item in ranked[:5]) if ranked else "none"
                 self.logger.info(
                     context.run,
                     (
                         f"Selector debug: category_filtered=0 "
                         f"(uses_native_trends_filter={uses_native_trends_filter}, "
-                        f"topic_category={topic_category}, country={context.run.country})"
+                        f"topic_category={topic_category}, country={context.run.country}, "
+                        f"ranked={len(ranked)}, sample_keywords={sample_keywords})"
                     ),
                 )
-                raise RuntimeError(
-                    f"No {category_label} topics were found in the current {context.run.country} trend feed"
-                )
+                if ranked:
+                    self.logger.info(
+                        context.run,
+                        (
+                            f"No {category_label} matches were found; "
+                            "falling back to general trend selection"
+                        ),
+                    )
+                    category_filtered = ranked
+                else:
+                    raise RuntimeError(
+                        f"No {category_label} topics were found in the current {context.run.country} trend feed"
+                    )
             if uses_native_trends_filter:
                 self.logger.info(
                     context.run,
