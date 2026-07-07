@@ -2187,8 +2187,7 @@ def create_vector_store(config: AppConfig, cloud_sync=None) -> VectorStore:
 
     storage_root = Path(config.storage_root) / "vector-store"
 
-    b2_sync_enabled = bool(getattr(config, "vector_store_b2_sync_enabled", True))
-    if cloud_sync is not None and b2_sync_enabled:
+    if cloud_sync is not None:
         return SyncedJSONVectorStore(storage_root, cloud_sync=cloud_sync)
 
     return JSONVectorStore(storage_root)
@@ -2368,33 +2367,12 @@ class AnchorInjectorService:
 
         result = "".join(output_parts)
 
-        # ── NEW: Also Read fallback ─────────────────────────────────────
-        # If no anchors were inserted inline, optionally append a single
-        # "Also Read" callout using the top relevance link.
-        also_read_enabled = bool(
-            getattr(self.config, "internal_link_also_read_enabled", True)
-        )
-        if also_read_enabled and total_links_inserted == 0 and internal_links:
-            top_link = max(internal_links, key=lambda l: l.get("relevance_score", 0.0))
-            also_read_block = (
-                "\n<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n"
-                "<!-- wp:paragraph -->\n"
-                f"<p><strong>Also Read:</strong> <a href=\"{escape(top_link['url'], quote=True)}\">{escape(top_link['title'])}</a></p>\n"
-                "<!-- /wp:paragraph -->\n"
-                "<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n"
-            )
-
-            close_match = re.search(r'</article>\s*$', result, flags=re.IGNORECASE)
-            if close_match:
-                result = result[:close_match.start()] + also_read_block + result[close_match.start():]
-            else:
-                result = result + also_read_block
-
-            total_links_inserted = 1
-
         # ── NEW: Related Articles fallback ───────────────────────────────
-        # If no anchors were inserted inline and Also Read did not run,
-        # optionally append a "Related Articles" section with up to 4 links.
+        # If no anchors were inserted inline (which happens when the
+        # article body doesn't naturally contain the anchor phrases of
+        # the related articles — e.g., a "Mexico vs South Korea" article
+        # won't mention "Saudi Arabia" or "Belgium"), append a clean
+        # "Related Articles" section at the end with up to 4 links.
         #
         # These links:
         #   - Use the correct URLs from the vector store (www.peoplenewstime.com/...)
