@@ -174,24 +174,30 @@ class PublisherService:
         return path
 
     def recently_published_cluster_keys(self) -> set[str]:
+        return self._recently_published_values("cluster_key")
+
+    def recently_published_slugs(self) -> set[str]:
+        return self._recently_published_values("slug")
+
+    def _recently_published_values(self, field_name: str) -> set[str]:
         entries = self._load_topic_registry()
         if not entries:
             return set()
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.config.duplicate_lookback_hours)
-        cluster_keys: set[str] = set()
+        values: set[str] = set()
         for entry in entries:
             published_at = entry.get("published_at")
-            cluster_key = entry.get("cluster_key")
-            if not published_at or not cluster_key:
+            field_value = entry.get(field_name)
+            if not published_at or not field_value:
                 continue
             try:
                 published_time = datetime.fromisoformat(published_at)
             except ValueError:
                 continue
             if published_time >= cutoff:
-                cluster_keys.add(cluster_key)
-        return cluster_keys
+                values.add(str(field_value))
+        return values
 
     def publish(self, run) -> PublishArtifact:
         if run.selected_topic is None or run.blog is None:
@@ -199,6 +205,15 @@ class PublisherService:
 
         slug_source = run.blog.seo_keywords[0] if getattr(run.blog, "seo_keywords", None) else run.selected_topic.keyword
         slug = slugify(slug_source)
+        cluster_key = str(getattr(run.selected_topic, "cluster_key", "") or slugify(run.selected_topic.keyword)).strip()
+
+        recently_published_cluster_keys = self.recently_published_cluster_keys()
+        recently_published_slugs = self.recently_published_slugs()
+        if cluster_key in recently_published_cluster_keys or slug in recently_published_slugs:
+            raise RuntimeError(
+                "Duplicate publish blocked: this article matches a recent topic by cluster key or slug"
+            )
+
         markdown_path = self.blogs_dir / f"{slug}-{run.run_id}.md"
         html_path = self.blogs_dir / f"{slug}-{run.run_id}.html"
         metadata_path = self.cache_dir / f"publish-{slug}-{run.run_id}.json"
@@ -918,6 +933,7 @@ class PublisherService:
                 "run_id": run.run_id,
                 "keyword": run.selected_topic.keyword,
                 "cluster_key": run.selected_topic.cluster_key or slugify(run.selected_topic.keyword),
+                "slug": slugify(run.blog.seo_keywords[0] if getattr(run.blog, "seo_keywords", None) else run.selected_topic.keyword),
                 "published_at": run.started_at,
             }
         )

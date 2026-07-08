@@ -115,21 +115,24 @@ def _tail_lines(text: str, max_lines: int = 12, max_chars: int = 300) -> list[st
     return clipped
 
 
-def _write_main_failure_log(
+def _write_process_log(
     history_id: int,
+    step: str,
     cmd: list[str],
     returncode: int,
     stdout: str,
     stderr: str,
 ) -> str:
-    """Persist full command/stdout/stderr for failed main.py runs."""
+    """Persist full command/stdout/stderr for any scheduler subprocess run."""
     SCHEDULER_LOG_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = SCHEDULER_LOG_DIR / f"main-failure-h{history_id}-{ts}.log"
+    safe_step = re.sub(r"[^a-zA-Z0-9_-]+", "-", step).strip("-").lower() or "process"
+    log_path = SCHEDULER_LOG_DIR / f"{safe_step}-h{history_id}-{ts}.log"
 
     payload = [
         f"time: {_now_iso()}",
         f"history_id: {history_id}",
+        f"step: {step}",
         f"return_code: {returncode}",
         f"command: {' '.join(cmd)}",
         "",
@@ -263,7 +266,7 @@ def _publish_html(
     wordpress_status: str,
     html_path: Path,
     history_id: int,
-) -> bool:
+) -> tuple[bool, str | None]:
     """
     Publish an HTML file via publish_local_html.py.
 
@@ -278,7 +281,7 @@ def _publish_html(
             "publish_status": "skipped",
             "error_message": "category_id not configured",
         })
-        return False
+        return False, None
 
     cmd = [
         sys.executable,
@@ -297,19 +300,27 @@ def _publish_html(
     if result.stderr:
         print("PUBLISH STDERR:", result.stderr)
 
+    publish_log = _write_process_log(
+        history_id,
+        step="publish_local_html",
+        cmd=cmd,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
     if result.returncode != 0:
         update_history_entry(history_id, {
             "publish_status": "failed",
             "html_path": str(html_path),
-            "error_message": f"publish script exit code {result.returncode}",
         })
-        return False
+        return False, publish_log
 
     update_history_entry(history_id, {
         "publish_status": "success",
         "html_path": str(html_path),
     })
-    return True
+    return True, publish_log
 
 
 def _run_index_job(job: dict, trigger_type: str) -> bool:
@@ -351,6 +362,15 @@ def _run_index_job(job: dict, trigger_type: str) -> bool:
         print("INDEX STDERR:")
         print(result.stderr)
 
+    index_log = _write_process_log(
+        hist_id,
+        step="refresh_vector_store",
+        cmd=cmd,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
     if result.returncode not in (0, 2):
         err = _summarize_main_failure(
             result.stdout,
@@ -361,13 +381,18 @@ def _run_index_job(job: dict, trigger_type: str) -> bool:
             "finished_at": _now_iso(),
             "status": "failed",
             "publish_status": "skipped",
-            "error_message": err,
+            "error_message": f"{err} | index_log: {index_log}",
         })
         return False
 
     error_message = None
     if result.returncode == 2:
-        error_message = "refresh_vector_store.py completed with partial indexing errors"
+        error_message = (
+            "refresh_vector_store.py completed with partial indexing errors "
+            f"| index_log: {index_log}"
+        )
+    else:
+        error_message = f"index_log: {index_log}"
 
     update_history_entry(hist_id, {
         "finished_at": _now_iso(),
@@ -442,15 +467,17 @@ def _run_single_category(
             cwd=str(PROJECT_ROOT),
         )
 
+        main_log = _write_process_log(
+            hist_id,
+            step=f"main_{cat_name}",
+            cmd=cmd,
+            returncode=returncode,
+            stdout=stdout_text,
+            stderr=stderr_text,
+        )
+
         # ── main.py failed ────────────────────────────────────────────
         if returncode != 0:
-            failure_log = _write_main_failure_log(
-                hist_id,
-                cmd,
-                returncode,
-                stdout_text,
-                stderr_text,
-            )
             err = _summarize_main_failure(
                 stdout_text,
                 stderr_text,
@@ -461,11 +488,11 @@ def _run_single_category(
                 print("[Scheduler] main.py failure tail:")
                 for line in tail:
                     print(f"  {line}")
-            print(f"[{cat_name}] {err} | debug_log={failure_log}")
+            print(f"[{cat_name}] {err} | debug_log={main_log}")
             update_history_entry(hist_id, {
                 "finished_at": _now_iso(),
                 "status": "failed",
-                "error_message": f"{err} | log: {failure_log}",
+                "error_message": f"{err} | main_log: {main_log}",
             })
             return False
 
@@ -475,6 +502,7 @@ def _run_single_category(
             "finished_at": _now_iso(),
             "status": "success",
             "run_id": run_id,
+            "error_message": f"main_log: {main_log}",
         })
 
         # ── Sync artifacts to cloud (B2 + MongoDB) ─────────────────────
@@ -501,7 +529,15 @@ def _run_single_category(
         if run_id:
             html_path = _find_generated_html(run_id)
             if html_path:
-                publish_ok = _publish_html(category_id, wp_status, html_path, hist_id)
+                publish_ok, publish_log = _publish_html(category_id, wp_status, html_path, hist_id)
+                if publish_log:
+                    update_history_entry(hist_id, {
+                        "error_message": f"main_log: {main_log} | publish_log: {publish_log}",
+                    })
+                elif publish_ok:
+                    update_history_entry(hist_id, {
+                        "error_message": f"main_log: {main_log}",
+                    })
 
                 # Mark as published in blog_metadata
                 if publish_ok:

@@ -626,13 +626,6 @@ class B2Engine:
     # ── Object info ───────────────────────────────────────────────────
 
     def object_exists(self, bucket: str, key: str) -> bool:
-        """
-        Check if an object exists in the configured bucket.
-
-        Args:
-            bucket: Logical category (prefix is auto-prepended if needed).
-            key:    Object key.
-        """
         actual_bucket = _bucket_name()
         object_key = _resolve_object_key(bucket, key)
         try:
@@ -640,7 +633,10 @@ class B2Engine:
             return True
         except ClientError as exc:
             err_code = exc.response.get("Error", {}).get("Code", "")
-            if err_code in ("404", "NoSuchKey"):
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            # B2's S3-compat layer often returns 403 (not 404) for missing keys
+            # when using a scoped Application Key — treat it the same as "not found".
+            if err_code in ("404", "NoSuchKey") or status in (403, 404):
                 return False
             raise
 

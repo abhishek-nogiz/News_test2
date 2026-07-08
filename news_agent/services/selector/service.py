@@ -3,7 +3,7 @@ from __future__ import annotations
 from ...core.logger import PipelineLogger
 from ...models import TrendTopic
 from ..base import AgentContext, BaseAgent
-from ..helpers import display_topic_category, tokenize, topic_category_trends_filter_id, topic_matches_category
+from ..helpers import display_topic_category, slugify, tokenize, topic_category_trends_filter_id, topic_matches_category
 
 
 class TopicIntelligenceService:
@@ -149,12 +149,24 @@ class SelectorAgent(BaseAgent):
                     f"Kept {len(category_filtered)} {category_label} topics after topical filtering",
                 )
 
-        recently_published = self.publisher.recently_published_cluster_keys()
-        filtered_ranked = [trend for trend in category_filtered if trend.cluster_key not in recently_published]
-        if recently_published:
+        recently_published_cluster_keys = self.publisher.recently_published_cluster_keys()
+        recently_published_slugs = self.publisher.recently_published_slugs()
+        filtered_ranked = [
+            trend
+            for trend in category_filtered
+            if trend.cluster_key not in recently_published_cluster_keys
+            and slugify(trend.keyword) not in recently_published_slugs
+        ]
+        if recently_published_cluster_keys or recently_published_slugs:
             skipped = len(category_filtered) - len(filtered_ranked)
             if skipped > 0:
-                self.logger.info(context.run, f"Skipped {skipped} recently published topics")
+                self.logger.info(
+                    context.run,
+                    (
+                        f"Skipped {skipped} recently published topics "
+                        f"(cluster_keys={len(recently_published_cluster_keys)}, slugs={len(recently_published_slugs)})"
+                    ),
+                )
 
         selected_topic = filtered_ranked[0] if filtered_ranked else None
         if selected_topic is None:

@@ -1465,6 +1465,12 @@ class RetrievalService:
         # 2. Vector search (with category filter from topic)
         category_filter = self._topic_categories(topic)
         search_limit = min(40, max(10, target_word_count // 50))
+        print(
+            "[InternalLink][Retrieval] start "
+            f"tenant_request='{tenant_id}' query_embedding_ready={bool(query_embedding)} "
+            f"category_filter={sorted(category_filter) if category_filter else []} "
+            f"search_limit={search_limit}"
+        )
 
         candidates: List[dict] = []
         for current_tenant_id in self._resolve_tenant_candidates(tenant_id):
@@ -1480,12 +1486,22 @@ class RetrievalService:
                 # No embedding model — fallback to keyword-only
                 current_candidates = self._keyword_fallback(current_tenant_id, topic, limit=search_limit)
 
+            print(
+                "[InternalLink][Retrieval] tenant_search "
+                f"tenant='{current_tenant_id}' candidates={len(current_candidates)} "
+                f"used_vector_search={bool(query_embedding)}"
+            )
+
             if current_candidates:
                 self.last_resolved_tenant_id = current_tenant_id
                 candidates = current_candidates
                 break
 
         if not candidates:
+            print(
+                "[InternalLink][Retrieval] no_candidates "
+                f"tenants_tried={self.last_tried_tenant_ids}"
+            )
             return []
 
         candidates = [
@@ -1493,6 +1509,7 @@ class RetrievalService:
             if self._is_allowed_internal_link_url(c.get("url", ""))
         ]
         if not candidates:
+            print("[InternalLink][Retrieval] all_candidates_filtered_by_domain")
             return []
 
         # 3. Exclude self-referencing slug
@@ -1507,9 +1524,17 @@ class RetrievalService:
         scored = self._dedupe_scored_candidates(scored)
         link_limit = min(8, max(2, int(target_word_count / 200)))
         top_candidates = scored[:link_limit * 2]
+        print(
+            "[InternalLink][Retrieval] scored "
+            f"candidates={len(candidates)} top_candidates={len(top_candidates)} link_limit={link_limit}"
+        )
 
         # 6. LLM reasoning filter (for the 'reason' field only, NOT anchors)
         final_links = self._llm_reasoning_filter(topic, top_candidates, limit=link_limit)
+        print(
+            "[InternalLink][Retrieval] final "
+            f"final_links={len(final_links)}"
+        )
 
         return final_links
 
@@ -2051,7 +2076,25 @@ class SyncedJSONVectorStore(VectorStore):
     def _normalize_tenant_id(self, tenant_id: str) -> str:
         """Use a stable tenant key for B2 object paths."""
         normalized = (tenant_id or "").strip()
-        return normalized or "_default"
+        if not normalized:
+            return "_default"
+
+        candidate = normalized
+        if "://" in candidate:
+            try:
+                parsed = urlparse(candidate)
+                candidate = parsed.hostname or candidate
+            except Exception:
+                pass
+
+        candidate = candidate.strip().lower()
+        if candidate.startswith("www."):
+            candidate = candidate[4:]
+
+        # Keep tenant IDs path-safe and stable for local/B2 namespace parity.
+        candidate = re.sub(r"[^a-z0-9._-]+", "-", candidate)
+        candidate = re.sub(r"-+", "-", candidate).strip("-.")
+        return candidate or "_default"
 
     def _download_from_b2(self, tenant_id: str) -> None:
         """Pull documents.json + embeddings.json from B2 → local cache."""
@@ -2181,15 +2224,32 @@ def create_vector_store(config: AppConfig, cloud_sync=None) -> VectorStore:
     """
     store_type = getattr(config, "vector_store_type", "json")
     database_url = getattr(config, "vector_store_database_url", "")
+    tenant_id = getattr(config, "tenant_id", "") or "_default"
 
     if store_type == "pgvector" and database_url and psycopg2 is not None:
+        print(
+            "[InternalLink][VectorStore] mode=pgvector "
+            f"tenant={tenant_id} database_url_set={bool(database_url)}"
+        )
         return PgvectorStore(database_url)
 
     storage_root = Path(config.storage_root) / "vector-store"
+    b2_sync_enabled = bool(getattr(config, "vector_store_b2_sync_enabled", True))
+    cloud_sync_present = cloud_sync is not None
 
-    if cloud_sync is not None:
+    if cloud_sync is not None and b2_sync_enabled:
+        print(
+            "[InternalLink][VectorStore] mode=synced-json "
+            f"tenant={tenant_id} b2_sync_enabled={b2_sync_enabled} "
+            f"cloud_sync_present={cloud_sync_present} storage_root={storage_root}"
+        )
         return SyncedJSONVectorStore(storage_root, cloud_sync=cloud_sync)
 
+    print(
+        "[InternalLink][VectorStore] mode=json-local "
+        f"tenant={tenant_id} b2_sync_enabled={b2_sync_enabled} "
+        f"cloud_sync_present={cloud_sync_present} storage_root={storage_root}"
+    )
     return JSONVectorStore(storage_root)
 
 
@@ -2291,9 +2351,21 @@ class InternalLinkAgent(BaseAgent):
         context.run.blog.article_html = linked_html
 
         inserted_count = linked_html.count("<a ") - original_html.count("<a ")
+        also_read_present = bool(re.search(r"<strong>Also Read:</strong>", linked_html, flags=re.IGNORECASE))
         self.logger.info(
             context.run,
             f"Retrieved {len(links)} internal links and inserted {inserted_count} anchors"
+        )
+        self.logger.info(
+            context.run,
+            (
+                "Internal-link outcome: "
+                f"links_retrieved={len(links)}, "
+                f"anchors_inserted={inserted_count}, "
+                f"also_read_present={also_read_present}, "
+                f"also_read_enabled={getattr(self.retrieval_service.config, 'internal_link_also_read_enabled', True)}, "
+                f"related_articles_enabled={getattr(self.retrieval_service.config, 'internal_link_related_articles_enabled', True)}"
+            ),
         )
         self.logger.transition(context.run, "internal_links_loaded")
 
@@ -2324,6 +2396,11 @@ class AnchorInjectorService:
 
     def inject(self, article_html: str, internal_links: List[InternalLink]) -> str:
         if not internal_links or not article_html:
+            if article_html:
+                print(
+                    "[InternalLink][Injector] skipped "
+                    f"reason={'no_internal_links' if not internal_links else 'empty_article_html'}"
+                )
             return article_html
 
         total_links_inserted = 0
@@ -2367,50 +2444,82 @@ class AnchorInjectorService:
 
         result = "".join(output_parts)
 
-        # ── NEW: Related Articles fallback ───────────────────────────────
-        # If no anchors were inserted inline (which happens when the
-        # article body doesn't naturally contain the anchor phrases of
-        # the related articles — e.g., a "Mexico vs South Korea" article
-        # won't mention "Saudi Arabia" or "Belgium"), append a clean
-        # "Related Articles" section at the end with up to 4 links.
-        #
-        # These links:
-        #   - Use the correct URLs from the vector store (www.peoplenewstime.com/...)
-        #   - Have NO rel="nofollow" (good for SEO)
-        #   - Have NO target="_blank" (clean internal links)
-        #   - Are sorted by relevance score (best first)
+        # Fallback rendering when inline anchor matching inserts nothing.
+        # Also Read and Related Articles are independently toggleable.
+        also_read_enabled = bool(
+            getattr(self.config, "internal_link_also_read_enabled", True)
+        )
         related_articles_enabled = bool(
             getattr(self.config, "internal_link_related_articles_enabled", True)
         )
-        if related_articles_enabled and total_links_inserted == 0 and internal_links:
+        if total_links_inserted == 0 and internal_links:
             sorted_links = sorted(
                 internal_links,
                 key=lambda l: l.get("relevance_score", 0.0),
                 reverse=True,
             )
-            related_links = sorted_links[:4]
+            fallback_blocks: list[str] = []
 
-            list_items = []
-            for link in related_links:
-                url = escape(link["url"], quote=True)
-                title = escape(link["title"])
-                list_items.append(f'<li><a href="{url}">{title}</a></li>')
+            if also_read_enabled:
+                top_link = sorted_links[0]
+                top_url = escape(top_link["url"], quote=True)
+                top_title = escape(top_link["title"])
+                fallback_blocks.append(
+                    '\n<!-- wp:paragraph -->\n'
+                    f'<p><strong>Also Read:</strong> <a href="{top_url}">{top_title}</a></p>\n'
+                    '<!-- /wp:paragraph -->\n'
+                )
 
-            related_block = (
-                '\n<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n'
-                '<!-- wp:heading -->\n<h2>Related Articles</h2>\n<!-- /wp:heading -->\n'
-                '<!-- wp:list -->\n<ul>\n'
-                + "\n".join(list_items)
-                + '\n</ul>\n<!-- /wp:list -->\n'
-            )
+            if related_articles_enabled:
+                related_links = sorted_links[:4]
+                list_items = []
+                for link in related_links:
+                    url = escape(link["url"], quote=True)
+                    title = escape(link["title"])
+                    list_items.append(f'<li><a href="{url}">{title}</a></li>')
 
-            close_match = re.search(r'</article>\s*$', result, flags=re.IGNORECASE)
-            if close_match:
-                result = result[:close_match.start()] + related_block + result[close_match.start():]
+                fallback_blocks.append(
+                    '\n<!-- wp:separator -->\n<hr />\n<!-- /wp:separator -->\n'
+                    '<!-- wp:heading -->\n<h2>Related Articles</h2>\n<!-- /wp:heading -->\n'
+                    '<!-- wp:list -->\n<ul>\n'
+                    + "\n".join(list_items)
+                    + '\n</ul>\n<!-- /wp:list -->\n'
+                )
+
+            if fallback_blocks:
+                fallback_block = "".join(fallback_blocks)
+                sources_match = re.search(
+                    r"<!--\s*wp:heading(?:\s+\{[^>]*\})?\s*-->\s*<h2[^>]*>\s*Sources\s*</h2>\s*<!--\s*/wp:heading\s*-->",
+                    result,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                close_match = re.search(r'</article>\s*$', result, flags=re.IGNORECASE)
+
+                if sources_match:
+                    result = result[:sources_match.start()] + fallback_block + result[sources_match.start():]
+                elif close_match:
+                    result = result[:close_match.start()] + fallback_block + result[close_match.start():]
+                else:
+                    result = result + fallback_block
+
+                total_links_inserted = 1
+
+                print(
+                    "[InternalLink][Injector] fallback_inserted "
+                    f"also_read={also_read_enabled} related_articles={related_articles_enabled} "
+                    f"candidate_links={len(internal_links)}"
+                )
             else:
-                result = result + related_block
-
-            total_links_inserted = len(related_links)
+                print(
+                    "[InternalLink][Injector] fallback_skipped "
+                    f"also_read={also_read_enabled} related_articles={related_articles_enabled} "
+                    f"candidate_links={len(internal_links)}"
+                )
+        elif internal_links:
+            print(
+                "[InternalLink][Injector] inline_inserted "
+                f"anchors={total_links_inserted} candidate_links={len(internal_links)}"
+            )
 
         return result
 
