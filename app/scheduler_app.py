@@ -23,6 +23,7 @@ API routes:
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime
 
@@ -56,6 +57,25 @@ from app.scheduler_service import start_scheduler_service, execute_job
 
 app = Flask(__name__)
 
+from dotenv import load_dotenv
+load_dotenv(override=True) 
+
+def _log_payload(label: str, payload) -> None:
+    """Print exact payload content for debugging request/DB flow."""
+    print("\n" + "=" * 100)
+    print(f"[Scheduler Payload] {label}")
+    if isinstance(payload, str):
+        print(payload)
+    else:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print("=" * 100 + "\n")
+
+
+def _log_auth_header(label: str) -> None:
+    auth = request.headers.get("Authorization", "")
+    if auth:
+        _log_payload(f"{label} Authorization header", auth)
+
 
 # ── Page ─────────────────────────────────────────────────────────────────
 
@@ -79,6 +99,10 @@ def api_list_jobs():
 @app.route("/api/jobs", methods=["POST"])
 def api_create_job():
     data = request.get_json(silent=True) or {}
+    _log_payload("POST /api/jobs raw body", request.get_data(as_text=True) or "")
+    _log_payload("POST /api/jobs parsed JSON", data)
+    _log_auth_header("POST /api/jobs")
+
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"error": "Job name is required"}), 400
@@ -93,7 +117,7 @@ def api_create_job():
     if job_type == JOB_TYPE_INDEX:
         interval_hours = data.get("interval_hours", 24)  # Default 24h for indexing
 
-        job = create_job({
+        job_payload = {
             "name": name,
             "job_type": job_type,
             "interval_hours": interval_hours,
@@ -103,7 +127,9 @@ def api_create_job():
             "topic_category": "",
             "category_id": "",
             "wordpress_status": "draft",
-        })
+        }
+        _log_payload("create_job payload (index)", job_payload)
+        job = create_job(job_payload)
         return jsonify(job), 201
 
     # ═══════════════════════════════════════════════════════════════════
@@ -134,7 +160,7 @@ def api_create_job():
         topic_category = cat.get("topic_category", data.get("topic_category", "sports"))
         category_id = cat.get("category_id", data.get("category_id", ""))
 
-    job = create_job({
+    job_payload = {
         "name": name,
         "job_type": job_type,
         "run_at": data.get("run_at"),
@@ -144,13 +170,19 @@ def api_create_job():
         "topic_category": topic_category,
         "category_id": category_id,
         "wordpress_status": data.get("wordpress_status", "draft"),
-    })
+    }
+    _log_payload("create_job payload (alarm/interval)", job_payload)
+    job = create_job(job_payload)
     return jsonify(job), 201
 
 
 @app.route("/api/jobs/<int:job_id>", methods=["PUT"])
 def api_update_job(job_id):
     data = request.get_json(silent=True) or {}
+    _log_payload(f"PUT /api/jobs/{job_id} raw body", request.get_data(as_text=True) or "")
+    _log_payload(f"PUT /api/jobs/{job_id} parsed JSON", data)
+    _log_auth_header(f"PUT /api/jobs/{job_id}")
+
     existing = get_job(job_id)
     if not existing:
         return jsonify({"error": "Job not found"}), 404
@@ -167,6 +199,7 @@ def api_update_job(job_id):
             data["category_id"] = cat["category_id"]
 
     job = update_job(job_id, data)
+    _log_payload(f"update_job payload for job_id={job_id}", data)
     return jsonify(job)
 
 
@@ -234,6 +267,8 @@ def api_run_job(job_id):
 def api_history():
     job_id = request.args.get("job_id", type=int)
     limit = request.args.get("limit", 50, type=int)
+    _log_payload("GET /api/history query params", {"job_id": job_id, "limit": limit})
+    _log_auth_header("GET /api/history")
     return jsonify(get_history(job_id=job_id, limit=limit))
 
 

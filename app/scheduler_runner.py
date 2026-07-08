@@ -146,9 +146,6 @@ def run_job():
             str(cfg["country"]),
             "--topic-category",
             str(cfg["topic_category"]),
-            "--wordpress-sync",
-            "--wordpress-status",
-            "draft",
         ]
 
         print("\n" + "=" * 60)

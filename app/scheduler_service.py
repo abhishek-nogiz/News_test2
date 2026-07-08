@@ -447,14 +447,12 @@ def _run_single_category(
             str(MAIN_PY),
             "--country", country,
             "--topic-category", topic_cat,
-            "--wordpress-sync",
-            "--wordpress-status", wp_status,
             "--trigger", trigger_type,
         ]
 
         print(
             f"[Scheduler] starting job_id={job_id} cat={cat_name} "
-            f"topic_category={topic_cat} wp_status={wp_status} trigger={trigger_type}"
+            f"topic_category={topic_cat} people_status={wp_status} trigger={trigger_type}"
         )
         print(f"\n{'='*60}")
         print(f"Job #{job_id} '{job['name']}' — category: {cat_name}")

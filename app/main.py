@@ -7,7 +7,6 @@ import json
 
 from config import AppConfig
 from news_agent import ContentPipeline
-from news_agent.services import PublisherService
 from news_agent.services.helpers import serialize
 
 
@@ -93,17 +92,23 @@ def main() -> int:
         max_topics=args.max_topics or config.max_topics,
         research_results=args.research_results or config.research_results,
         topic_category=args.topic_category or config.topic_category,
-        wordpress_sync_enabled=args.wordpress_sync or config.wordpress_sync_enabled,
-        wordpress_status=args.wordpress_status or config.wordpress_status,
+        # Force-disable WordPress publishing endpoint; PeopleNewsTime remains active.
+        wordpress_sync_enabled=False,
+        wordpress_status="draft",
         duplicate_lookback_hours=args.duplicate_lookback_hours or config.duplicate_lookback_hours,
         storage_root=Path(args.storage_root) if args.storage_root else config.storage_root,
         mock_mode=args.mock or config.mock_mode,
     )
 
     if args.wordpress_check_auth:
-        auth = PublisherService(config).check_wordpress_auth()
-        print(json.dumps({"wordpress_auth": serialize(auth)}, indent=2))
-        return 0 if auth.authenticated else 1
+        print(json.dumps({
+            "wordpress_auth": {
+                "authenticated": False,
+                "disabled": True,
+                "reason": "WordPress publisher endpoint is disabled; PeopleNewsTime endpoint only",
+            }
+        }, indent=2))
+        return 1
 
     pipeline = ContentPipeline(config)
     run = pipeline.run(trigger_source=args.trigger, seed_topics=args.seed_topic or None)

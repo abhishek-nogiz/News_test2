@@ -21,7 +21,8 @@ from ...core.logger import PipelineLogger
 from ...models import PublishArtifact, WordPressAuthResult, WordPressPostMetadata, WordPressSyncResult
 from ..base import AgentContext, BaseAgent
 from ..helpers import serialize, slugify, tokenize
-
+from dotenv import load_dotenv
+load_dotenv(override=True) 
 
 WORDPRESS_CATEGORY_IDS = {
         "US": 2,
@@ -158,6 +159,10 @@ class PublisherService:
         for directory in [self.root, self.trends_dir, self.blogs_dir, self.cache_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
+    def _wordpress_sync_blocked(self) -> bool:
+        """WordPress publisher endpoint is intentionally disabled for this deployment."""
+        return True
+
     def save_trends(self, run_id: str, trends) -> Path:
         path = self.trends_dir / f"{run_id}.json"
         self._write_json(path, serialize(trends))
@@ -228,8 +233,10 @@ class PublisherService:
         html_path.write_text(html_output, encoding="utf-8")
 
         wordpress_sync = None
-        if self.config.wordpress_sync_enabled:
+        if self.config.wordpress_sync_enabled and not self._wordpress_sync_blocked():
             wordpress_sync = self._sync_to_wordpress(run, wordpress_metadata, html_output)
+        elif self.config.wordpress_sync_enabled:
+            print("[Publisher] WordPress sync blocked; using PeopleNewsTime endpoint only.")
 
         artifact = PublishArtifact(
             markdown_path=str(markdown_path),
@@ -324,8 +331,10 @@ class PublisherService:
         html_output = self._ensure_target_blank_links(html_output)
 
         wordpress_sync = None
-        if self.config.wordpress_sync_enabled:
+        if self.config.wordpress_sync_enabled and not self._wordpress_sync_blocked():
             wordpress_sync = self._sync_to_wordpress(run, wordpress_metadata, html_output)
+        elif self.config.wordpress_sync_enabled:
+            print("[Publisher] WordPress sync blocked; using PeopleNewsTime endpoint only.")
 
         artifact = PublishArtifact(
             markdown_path=saved_paths["markdown"],
@@ -376,8 +385,10 @@ class PublisherService:
         html_output = self._ensure_target_blank_links(result.draft.html)
 
         wordpress_sync = None
-        if self.config.wordpress_sync_enabled:
+        if self.config.wordpress_sync_enabled and not self._wordpress_sync_blocked():
             wordpress_sync = self._sync_to_wordpress(run, wordpress_metadata, html_output)
+        elif self.config.wordpress_sync_enabled:
+            print("[Publisher] WordPress sync blocked; using PeopleNewsTime endpoint only.")
 
         artifact = PublishArtifact(
             markdown_path=str(saved_paths.get("markdown_export") or ""),
@@ -784,9 +795,19 @@ class PublisherService:
         return graphql_url.rsplit("/", 1)[0] if "/" in graphql_url else None
 
     def _wordpress_rest_request(self, url: str, payload: dict[str, object]) -> dict:
+        bearer_token = str(getattr(self.config, "wordpress_bearer_token", "") or "").strip()
         token = base64.b64encode(
             f"{self.config.wordpress_graphql_user}:{self.config.wordpress_graphql_password}".encode("utf-8")
         ).decode("ascii")
+        auth_header = f"Bearer {bearer_token}" if bearer_token else f"Basic {token}"
+        print("\n" + "=" * 100)
+        print("[Publisher Request] WordPress REST")
+        print(f"URL: {url}")
+        print(f"Authorization: {auth_header}")
+        print("Payload:")
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("=" * 100 + "\n")
+
         request = Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -797,7 +818,7 @@ class PublisherService:
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
                 ),
-                "Authorization": f"Basic {token}",
+                "Authorization": auth_header,
             },
             method="POST",
         )
@@ -868,12 +889,22 @@ class PublisherService:
         )
 
     def _graphql_request(self, query: str, variables: dict) -> dict:
+        bearer_token = str(getattr(self.config, "wordpress_bearer_token", "") or "").strip()
         token = base64.b64encode(
             f"{self.config.wordpress_graphql_user}:{self.config.wordpress_graphql_password}".encode("utf-8")
         ).decode("ascii")
+        auth_header = f"Bearer {bearer_token}" if bearer_token else f"Basic {token}"
         payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
         url_parts = urlsplit(self.config.wordpress_graphql_url or "")
         origin = f"{url_parts.scheme}://{url_parts.netloc}"
+        print("\n" + "=" * 100)
+        print("[Publisher Request] WordPress GraphQL")
+        print(f"URL: {self.config.wordpress_graphql_url}")
+        print(f"Authorization: {auth_header}")
+        print("Payload:")
+        print(json.dumps({"query": query, "variables": variables}, indent=2, ensure_ascii=False))
+        print("=" * 100 + "\n")
+
         request = Request(
             self.config.wordpress_graphql_url,
             data=payload,
@@ -886,7 +917,7 @@ class PublisherService:
                 ),
                 "Origin": origin,
                 "Referer": f"{origin}/",
-                "Authorization": f"Basic {token}",
+                "Authorization": auth_header,
             },
             method="POST",
         )
