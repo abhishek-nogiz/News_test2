@@ -1172,7 +1172,8 @@ class IndexingService:
             return None
         try:
             self._hf_client = create_embeddings_client(self.config)
-        except Exception:
+        except Exception as exc:
+            print(f"[hf_client] init failed: {exc!r}")
             self._hf_client = None
         return self._hf_client
 
