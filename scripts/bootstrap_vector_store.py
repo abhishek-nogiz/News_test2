@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 One-time bootstrap: build the full vector-store library from scratch.
@@ -79,7 +80,7 @@ def main() -> int:
         import os
         os.environ["NEWS_AGENT_SITEMAP_MAX_URLS"] = str(args.max_urls)
 
-    from news_agent.core.config import AppConfig
+    from news_agent_working.core.config import AppConfig
     config = AppConfig.from_env()
 
     tenant_id = config.tenant_id or "_default"
@@ -119,7 +120,7 @@ def main() -> int:
         print("Continuing in local-only mode (no B2 backup).")
         cloud_sync = None
 
-    from news_agent.services.internalLink import (
+    from news_agent_working.services.internalLink import (
         create_vector_store,
         IndexingService,
     )
@@ -166,3 +167,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

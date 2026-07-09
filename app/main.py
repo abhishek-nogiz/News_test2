@@ -6,8 +6,8 @@ import argparse
 import json
 
 from config import AppConfig
-from news_agent import ContentPipeline
-from news_agent.services.helpers import serialize
+from news_agent_working import ContentPipeline
+from news_agent_working.services.helpers import serialize
 
 
 def build_parser() -> argparse.ArgumentParser:

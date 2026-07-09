@@ -273,7 +273,7 @@ def api_history():
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
-
+import os
 if __name__ == "__main__":
     start_scheduler_service()
-    app.run(host="0.0.0.0", port=8000, debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("APP_PORT", 8000)), debug=False)

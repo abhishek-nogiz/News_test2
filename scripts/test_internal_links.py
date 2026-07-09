@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 End-to-end smoke test for the internal-linking retrieval flow.
@@ -57,8 +58,8 @@ def main() -> int:
         import os
         os.environ["NEWS_AGENT_TENANT_ID"] = args.tenant
 
-    from news_agent.core.config import AppConfig
-    from news_agent.models import TrendTopic
+    from news_agent_working.core.config import AppConfig
+    from news_agent_working.models import TrendTopic
     config = AppConfig.from_env()
 
     tenant_id = config.tenant_id or "_default"
@@ -82,7 +83,7 @@ def main() -> int:
         print(f"[CloudSync] not available: {exc} — using local cache only")
         cloud_sync = None
 
-    from news_agent.services.internalLink import (
+    from news_agent_working.services.internalLink import (
         create_vector_store,
         RetrievalService,
     )
@@ -141,3 +142,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
