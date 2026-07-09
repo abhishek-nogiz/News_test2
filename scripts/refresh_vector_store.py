@@ -63,7 +63,7 @@ def main() -> int:
         import os
         os.environ["NEWS_AGENT_TENANT_ID"] = args.tenant
 
-    from news_agent_working.core.config import AppConfig
+    from news_agent.core.config import AppConfig
     config = AppConfig.from_env()
 
     tenant_id = config.tenant_id or "_default"
@@ -82,7 +82,7 @@ def main() -> int:
         print(f"ERROR: CloudSync unavailable: {exc}")
         cloud_sync = None
 
-    from news_agent_working.services.internalLink import (
+    from news_agent.services.internalLink import (
         create_vector_store,
         IndexingService,
     )
