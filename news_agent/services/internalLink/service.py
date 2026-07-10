@@ -1849,7 +1849,8 @@ Return ONLY a valid JSON object with a "links" array of objects.
     def _map_to_link(self, candidate: dict, reason: str = "") -> InternalLink:
         normalized_url = self._normalize_internal_link_url(candidate.get("url", ""))
         return InternalLink(
-            title=candidate["title"],
+            # title=candidate["title"],
+            title=self._clean_candidate_title(candidate.get("title", "")),
             url=normalized_url,
             slug=candidate["slug"],
             relevance_score=candidate.get("_score", candidate.get("score", 0.0)),

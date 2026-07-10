@@ -1,4 +1,5 @@
 from .base import AgentContext, BaseAgent
+from .aeo import AEOAgent, AEOService
 from .generator.service import BlogGenerationService, WritingAgent
 from .image.service import ImageAgent, ImageEnrichmentService
 from .internalLink.service import (
@@ -29,6 +30,8 @@ from .validator.service import ReviewAgent, ValidationService
 __all__ = [
     "AgentContext",
     "BaseAgent",
+    "AEOService",
+    "AEOAgent",
     # Trigger
     "TriggerService",
     "TriggerAgent",

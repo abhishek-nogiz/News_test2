@@ -16,6 +16,8 @@ from .core import AppConfig, InMemoryStageQueue, PipelineLogger
 from .models import PipelineRun
 from .services import (
     AgentContext,
+    AEOAgent,
+    AEOService,
     # ── REMOVED: AdvancedInternalLinkingService ──
     # Replaced by IndexingService + RetrievalService
     IndexingService,
@@ -63,6 +65,7 @@ STAGE_SEQUENCE = [
     "memory",
     "planner",
     "generator",
+    "aeo",
     "internal_links",
     "validator",
     "image",
@@ -122,6 +125,13 @@ class ContentPipeline:
         self.memory_agent = MemoryAgent(self.editorial_memory_service, self.logger)
         self.planning_agent = PlanningAgent(planner_service or ContentPlanningService(config), self.logger)
         self.writing_agent = WritingAgent(generator_service or BlogGenerationService(config), self.logger)
+        self.aeo_agent = AEOAgent(AEOService(config), self.logger)
+        print("[PIPELINE] AEOAgent registered at stage 'aeo' (position 7/11)")
+        try:
+            import ai_optimization_v2
+            print(f"[PIPELINE] ai_optimization_v2 resolved OK (version={getattr(ai_optimization_v2, '__version__', 'unknown')})")
+        except ImportError:
+            print("[PIPELINE] WARNING ai_optimization_v2 NOT importable — AEO stage will silently skip")
 
         # ═══════════════════════════════════════════════════════════════
         # CHANGED: Internal Linking wiring (v2)
@@ -178,6 +188,7 @@ class ContentPipeline:
             self.memory_agent.stage_name: self.memory_agent,
             self.planning_agent.stage_name: self.planning_agent,
             self.writing_agent.stage_name: self.writing_agent,
+            self.aeo_agent.stage_name: self.aeo_agent,
             self.internal_link_agent.stage_name: self.internal_link_agent,
             self.review_agent.stage_name: self.review_agent,
             self.image_agent.stage_name: self.image_agent,
